@@ -1,0 +1,83 @@
+[package]
+name = "tastytrade-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Production-grade Rust client for the TastyTrade brokerage API"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/tastytrade-rs"
+documentation = "https://docs.rs/tastytrade-rs"
+readme = "README.md"
+keywords = ["tastytrade", "trading", "finance", "api", "async"]
+categories = ["api-bindings", "asynchronous", "finance"]
+authors = ["Your Name <your.email@example.com>"]
+
+[features]
+default = ["rustls-tls", "gzip", "streaming"]
+rustls-tls = ["reqwest/rustls-tls"]
+native-tls = ["reqwest/native-tls"]
+gzip = ["reqwest/gzip"]
+blocking = ["tokio/rt", "tokio/rt-multi-thread"]
+streaming = ["tokio-tungstenite", "futures-util"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["macros", "sync", "time"] }
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies"] }
+
+# WebSocket (optional, for streaming)
+tokio-tungstenite = { version = "0.24", features = ["native-tls"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Decimal handling for monetary values (critical for financial applications)
+rust_decimal = { version = "1.36", features = ["serde-with-str"] }
+rust_decimal_macros = "1.36"
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0"
+
+# URL handling
+url = "2.5"
+
+# Secret management - prevents accidental logging of sensitive data
+secrecy = { version = "0.10", features = ["serde"] }
+
+# Logging/tracing
+tracing = "0.1"
+
+# Async utilities
+async-trait = "0.1"
+pin-project-lite = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full", "test-util"] }
+wiremock = "0.6"
+pretty_assertions = "1.4"
+tokio-test = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[example]]
+name = "basic_auth"
+path = "examples/basic_auth.rs"
+
+[[example]]
+name = "place_order"
+path = "examples/place_order.rs"
+
+[[example]]
+name = "stream_quotes"
+path = "examples/stream_quotes.rs"
+required-features = ["streaming"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
