@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::client::paginated::{PaginatedStream, PaginatedStreamBuilder, DEFAULT_PAGE_SIZE};
 use crate::client::ClientInner;
 use crate::models::{
     AccountNumber, DryRunResponse, NewComplexOrder, NewOrder, Order, OrderId,
@@ -218,4 +219,63 @@ impl OrdersService {
 
         Ok(cancelled)
     }
+
+    /// Stream all orders for an account.
+    ///
+    /// This method returns a stream that lazily fetches pages of orders
+    /// as you iterate. This is more memory-efficient than `list()` for large
+    /// result sets (e.g., historical orders).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use futures_util::StreamExt;
+    /// use tastytrade_rs::AccountNumber;
+    ///
+    /// # async fn example(client: tastytrade_rs::TastytradeClient) -> tastytrade_rs::Result<()> {
+    /// let account = AccountNumber::new("5WV12345");
+    ///
+    /// // Stream all orders
+    /// let mut stream = client.orders().list_stream(&account, None);
+    ///
+    /// while let Some(result) = stream.next().await {
+    ///     let order = result?;
+    ///     println!("Order {}: {:?}", order.id, order.status);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn list_stream(
+        &self,
+        account_number: &AccountNumber,
+        query: Option<OrdersQueryStream>,
+    ) -> PaginatedStream<Order> {
+        let path = format!("/accounts/{}/orders", account_number);
+        PaginatedStreamBuilder::<Order>::new(self.inner.clone(), path)
+            .per_page(query.as_ref().and_then(|q| q.per_page).unwrap_or(DEFAULT_PAGE_SIZE))
+            .build_with_query(query)
+    }
+}
+
+/// Query parameters for streaming orders (without pagination fields).
+///
+/// Use this with `list_stream()`. Pagination is handled automatically by the stream.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct OrdersQueryStream {
+    /// Filter by status
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<Vec<OrderStatus>>,
+    /// Filter by underlying symbol
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlying_symbol: Option<String>,
+    /// Filter orders after this time
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_at: Option<DateTime<Utc>>,
+    /// Filter orders before this time
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_at: Option<DateTime<Utc>>,
+    /// Results per page (controls fetch batch size)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_page: Option<i32>,
 }

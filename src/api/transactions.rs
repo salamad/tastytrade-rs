@@ -5,6 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::client::paginated::{PaginatedStream, PaginatedStreamBuilder, DEFAULT_PAGE_SIZE};
 use crate::client::ClientInner;
 use crate::models::{AccountNumber, Transaction, TransactionType};
 use crate::Result;
@@ -107,6 +108,68 @@ impl TransactionsService {
             .get(&format!("/accounts/{}/transactions/total-fees", account_number))
             .await
     }
+
+    /// Stream all transactions for an account.
+    ///
+    /// This method returns a stream that lazily fetches pages of transactions
+    /// as you iterate. This is more memory-efficient than `list()` for large
+    /// result sets.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use futures_util::StreamExt;
+    /// use tastytrade_rs::AccountNumber;
+    ///
+    /// # async fn example(client: tastytrade_rs::TastytradeClient) -> tastytrade_rs::Result<()> {
+    /// let account = AccountNumber::new("5WV12345");
+    ///
+    /// // Stream all transactions
+    /// let mut stream = client.transactions().list_stream(&account, None);
+    ///
+    /// while let Some(result) = stream.next().await {
+    ///     let txn = result?;
+    ///     println!("{:?}: {:?}", txn.transaction_type, txn.symbol);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn list_stream(
+        &self,
+        account_number: &AccountNumber,
+        query: Option<TransactionsQueryStream>,
+    ) -> PaginatedStream<Transaction> {
+        let path = format!("/accounts/{}/transactions", account_number);
+        PaginatedStreamBuilder::<Transaction>::new(self.inner.clone(), path)
+            .per_page(query.as_ref().and_then(|q| q.per_page).unwrap_or(DEFAULT_PAGE_SIZE))
+            .build_with_query(query)
+    }
+}
+
+/// Query parameters for streaming transactions (without pagination fields).
+///
+/// Use this with `list_stream()`. Pagination is handled automatically by the stream.
+#[derive(Debug, Default, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct TransactionsQueryStream {
+    /// Filter by transaction type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_type: Option<TransactionType>,
+    /// Filter by symbol
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// Filter by underlying symbol
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlying_symbol: Option<String>,
+    /// Start of date range
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<DateTime<Utc>>,
+    /// End of date range
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<DateTime<Utc>>,
+    /// Results per page (controls fetch batch size)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_page: Option<i32>,
 }
 
 /// Total fees summary.

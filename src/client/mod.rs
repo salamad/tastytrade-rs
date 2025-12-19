@@ -23,7 +23,9 @@
 
 mod config;
 mod http;
+pub mod paginated;
 
 pub use config::{ClientConfig, RetryConfig};
 pub use http::TastytradeClient;
+pub use paginated::{PaginatedStream, PaginationInfo, DEFAULT_PAGE_SIZE};
 pub(crate) use http::ClientInner;
