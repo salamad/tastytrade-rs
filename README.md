@@ -10,6 +10,7 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 
 - **Full API Coverage**: Accounts, orders, positions, balances, transactions, instruments, market data, watchlists
 - **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for notifications
+- **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
 - **Async-first**: Built on Tokio for high-performance async I/O
 - **Authentication**: OAuth2 and legacy session-based authentication with automatic token refresh
@@ -343,6 +344,95 @@ async fn main() -> tastytrade_rs::Result<()> {
 }
 ```
 
+### Paginated Streaming
+
+For endpoints that return large result sets, use streaming iterators to lazily fetch pages on demand. This is more memory-efficient than loading all records at once.
+
+```rust
+use futures_util::StreamExt;
+use tastytrade_rs::{TastytradeClient, Environment, AccountNumber};
+use tastytrade_rs::api::TransactionsQueryStream;
+
+#[tokio::main]
+async fn main() -> tastytrade_rs::Result<()> {
+    let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
+    let account = AccountNumber::new("5WV12345");
+
+    // Stream ALL transactions lazily - pages are fetched as needed
+    let mut stream = client.transactions().list_stream(&account, None);
+
+    let mut count = 0;
+    while let Some(result) = stream.next().await {
+        let txn = result?;
+        println!("{:?}: {:?} - ${:?}",
+            txn.transaction_type,
+            txn.symbol,
+            txn.value
+        );
+        count += 1;
+    }
+    println!("Total transactions: {}", count);
+
+    Ok(())
+}
+```
+
+You can also filter and control batch size:
+
+```rust
+use futures_util::StreamExt;
+use tastytrade_rs::{TastytradeClient, Environment, AccountNumber};
+use tastytrade_rs::api::TransactionsQueryStream;
+use tastytrade_rs::models::TransactionType;
+
+#[tokio::main]
+async fn main() -> tastytrade_rs::Result<()> {
+    let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
+    let account = AccountNumber::new("5WV12345");
+
+    // Stream only trades with custom page size
+    let query = TransactionsQueryStream {
+        transaction_type: Some(TransactionType::Trade),
+        symbol: Some("AAPL".to_string()),
+        per_page: Some(100), // Fetch 100 items per page
+        ..Default::default()
+    };
+
+    let mut stream = client.transactions().list_stream(&account, Some(query));
+
+    while let Some(result) = stream.next().await {
+        let txn = result?;
+        println!("Trade: {:?} @ {:?}", txn.symbol, txn.value);
+    }
+
+    Ok(())
+}
+```
+
+Stream orders the same way:
+
+```rust
+use futures_util::StreamExt;
+use tastytrade_rs::{TastytradeClient, Environment, AccountNumber};
+use tastytrade_rs::api::OrdersQueryStream;
+
+#[tokio::main]
+async fn main() -> tastytrade_rs::Result<()> {
+    let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
+    let account = AccountNumber::new("5WV12345");
+
+    // Stream all historical orders
+    let mut stream = client.orders().list_stream(&account, None);
+
+    while let Some(result) = stream.next().await {
+        let order = result?;
+        println!("Order {}: {:?}", order.id, order.status);
+    }
+
+    Ok(())
+}
+```
+
 ### Watchlists
 
 ```rust
@@ -437,15 +527,16 @@ async fn main() -> tastytrade_rs::Result<()> {
 | Accounts | List, Get, Search | Complete |
 | Balances | Get, Snapshots, History | Complete |
 | Positions | List, Get | Complete |
-| Orders | Place, Cancel, Replace, Dry Run | Complete |
+| Orders | Place, Cancel, Replace, Dry Run, Stream | Complete |
 | Instruments | Equities, Options, Futures, Crypto | Complete |
 | Market Data | Quotes, Greeks, Metrics | Complete |
 | Option Chains | Flat, Nested, Compact | Complete |
-| Transactions | List, Get, Fees | Complete |
+| Transactions | List, Get, Fees, Stream | Complete |
 | Watchlists | Public, User, CRUD | Complete |
 | Search | Symbol Search | Complete |
 | DXLink Streaming | Quotes, Trades, Greeks, Summary | Complete |
 | Account Streaming | Orders, Positions, Balances | Complete |
+| Paginated Streaming | Lazy iteration over large result sets | Complete |
 
 ## Environments
 
