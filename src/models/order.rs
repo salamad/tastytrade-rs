@@ -2,9 +2,83 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::enums::*;
+
+/// Helper to deserialize timestamps that may come as integers (epoch ms) or strings.
+fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TimestampValue {
+        Int(i64),
+        String(String),
+        Null,
+    }
+
+    match TimestampValue::deserialize(deserializer)? {
+        TimestampValue::Int(0) => Ok(None), // 0 typically means no timestamp
+        TimestampValue::Int(ts) => {
+            // Could be seconds or milliseconds, heuristic: if > 1e12, it's ms
+            let secs = if ts > 1_000_000_000_000 {
+                ts / 1000
+            } else {
+                ts
+            };
+            DateTime::from_timestamp(secs, 0)
+                .map(Some)
+                .ok_or_else(|| D::Error::custom("Invalid timestamp"))
+        }
+        TimestampValue::String(s) => {
+            if s.is_empty() {
+                Ok(None)
+            } else {
+                DateTime::parse_from_rfc3339(&s)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(D::Error::custom)
+            }
+        }
+        TimestampValue::Null => Ok(None),
+    }
+}
+
+/// Helper to deserialize required timestamps that may come as integers (epoch ms) or strings.
+fn deserialize_timestamp<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum TimestampValue {
+        Int(i64),
+        String(String),
+    }
+
+    match TimestampValue::deserialize(deserializer)? {
+        TimestampValue::Int(ts) => {
+            // Could be seconds or milliseconds, heuristic: if > 1e12, it's ms
+            let secs = if ts > 1_000_000_000_000 {
+                ts / 1000
+            } else {
+                ts
+            };
+            DateTime::from_timestamp(secs, 0)
+                .ok_or_else(|| D::Error::custom("Invalid timestamp"))
+        }
+        TimestampValue::String(s) => {
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(D::Error::custom)
+        }
+    }
+}
 
 /// A new order to be submitted.
 ///
@@ -383,10 +457,12 @@ pub struct NewComplexOrder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Order {
-    /// Order ID
-    pub id: String,
+    /// Order ID (not present in dry run responses)
+    #[serde(default)]
+    pub id: Option<String>,
     /// Account number
-    pub account_number: String,
+    #[serde(default)]
+    pub account_number: Option<String>,
     /// Time in force
     pub time_in_force: TimeInForce,
     /// Order type
@@ -397,8 +473,9 @@ pub struct Order {
     /// Underlying instrument type
     #[serde(default)]
     pub underlying_instrument_type: Option<InstrumentType>,
-    /// Current status
-    pub status: OrderStatus,
+    /// Current status (not present in dry run responses)
+    #[serde(default)]
+    pub status: Option<OrderStatus>,
     /// Limit price
     #[serde(default)]
     pub price: Option<Decimal>,
@@ -438,13 +515,13 @@ pub struct Order {
     #[serde(default)]
     pub external_identifier: Option<String>,
     /// When the order was received
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub received_at: Option<DateTime<Utc>>,
     /// When the order was last updated
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub updated_at: Option<DateTime<Utc>>,
     /// When the order was filled/cancelled/expired
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_timestamp")]
     pub terminal_at: Option<DateTime<Utc>>,
     /// GTC date
     #[serde(default)]
@@ -465,28 +542,37 @@ pub struct Order {
 
 impl Order {
     /// Get the order ID as a strongly-typed value.
-    pub fn order_id(&self) -> super::OrderId {
-        super::OrderId::new(&self.id)
+    /// Returns `None` for dry run orders that don't have an ID.
+    pub fn order_id(&self) -> Option<super::OrderId> {
+        self.id.as_ref().map(|id| super::OrderId::new(id))
     }
 
     /// Returns `true` if the order can be cancelled.
     pub fn is_cancellable(&self) -> bool {
-        self.cancellable && !self.status.is_terminal()
+        if let Some(status) = &self.status {
+            self.cancellable && !status.is_terminal()
+        } else {
+            false
+        }
     }
 
     /// Returns `true` if the order can be modified.
     pub fn is_editable(&self) -> bool {
-        self.editable && !self.status.is_terminal()
+        if let Some(status) = &self.status {
+            self.editable && !status.is_terminal()
+        } else {
+            false
+        }
     }
 
     /// Returns `true` if the order is completely filled.
     pub fn is_filled(&self) -> bool {
-        matches!(self.status, OrderStatus::Filled)
+        matches!(self.status, Some(OrderStatus::Filled))
     }
 
     /// Returns `true` if the order is still working.
     pub fn is_working(&self) -> bool {
-        self.status.is_working()
+        self.status.as_ref().map(|s| s.is_working()).unwrap_or(false)
     }
 
     /// Calculate the fill percentage.
@@ -530,6 +616,7 @@ pub struct Fill {
     /// Fill price
     pub fill_price: Decimal,
     /// When the fill occurred
+    #[serde(deserialize_with = "deserialize_timestamp")]
     pub filled_at: DateTime<Utc>,
     /// Destination exchange
     #[serde(default)]

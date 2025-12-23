@@ -466,16 +466,18 @@ pub struct OptionStrike {
 }
 
 /// Symbol search result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct SymbolSearchResult {
     /// Trading symbol
+    #[serde(default)]
     pub symbol: String,
     /// Description
     #[serde(default)]
     pub description: Option<String>,
     /// Instrument type
-    pub instrument_type: InstrumentType,
+    #[serde(default)]
+    pub instrument_type: Option<InstrumentType>,
 }
 
 #[cfg(test)]

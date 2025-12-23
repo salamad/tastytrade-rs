@@ -54,6 +54,8 @@ impl BalancesService {
     /// * `account_number` - The account to query
     /// * `start_date` - Optional start date for the range
     /// * `end_date` - Optional end date for the range
+    ///
+    /// Note: Uses End-of-Day (EOD) as the default time-of-day for snapshots.
     pub async fn snapshots(
         &self,
         account_number: &AccountNumber,
@@ -64,9 +66,8 @@ impl BalancesService {
         #[serde(rename_all = "kebab-case")]
         struct Query {
             #[serde(skip_serializing_if = "Option::is_none")]
-            start_date: Option<NaiveDate>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            end_date: Option<NaiveDate>,
+            snapshot_date: Option<String>,
+            time_of_day: &'static str,
         }
 
         #[derive(serde::Deserialize)]
@@ -74,9 +75,13 @@ impl BalancesService {
             items: Vec<BalanceSnapshot>,
         }
 
+        // The API requires a snapshot-date, not date ranges
+        // If dates are provided, use start_date; otherwise no date filter
+        let snapshot_date = start_date.map(|d| d.format("%Y-%m-%d").to_string());
+
         let query = Query {
-            start_date,
-            end_date,
+            snapshot_date,
+            time_of_day: "EOD", // End of Day
         };
 
         let response: Response = self

@@ -43,7 +43,7 @@ use crate::Result;
 ///
 /// // Place the order
 /// let result = client.orders().place(&account, order).await?;
-/// println!("Order ID: {}", result.order.id);
+/// println!("Order ID: {:?}", result.order.id);
 /// # Ok(())
 /// # }
 /// ```
@@ -52,27 +52,70 @@ pub struct OrdersService {
 }
 
 /// Query parameters for listing orders.
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Default, Clone)]
 pub struct OrdersQuery {
     /// Filter by status
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Vec<OrderStatus>>,
     /// Filter by underlying symbol
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub underlying_symbol: Option<String>,
     /// Filter orders after this time
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_at: Option<DateTime<Utc>>,
     /// Filter orders before this time
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_at: Option<DateTime<Utc>>,
     /// Number of results per page
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub per_page: Option<i32>,
     /// Page offset
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub page_offset: Option<i32>,
+}
+
+impl OrdersQuery {
+    /// Build a query string from the query parameters.
+    fn to_query_string(&self) -> String {
+        let mut parts = Vec::new();
+
+        if let Some(statuses) = &self.status {
+            for status in statuses {
+                let status_str = match status {
+                    OrderStatus::Received => "Received",
+                    OrderStatus::Routed => "Routed",
+                    OrderStatus::InFlight => "In Flight",
+                    OrderStatus::Live => "Live",
+                    OrderStatus::CancelRequested => "Cancel Requested",
+                    OrderStatus::ReplaceRequested => "Replace Requested",
+                    OrderStatus::Contingent => "Contingent",
+                    OrderStatus::Filled => "Filled",
+                    OrderStatus::Cancelled => "Cancelled",
+                    OrderStatus::Expired => "Expired",
+                    OrderStatus::Rejected => "Rejected",
+                    OrderStatus::Removed => "Removed",
+                    OrderStatus::PartiallyRemoved => "Partially Removed",
+                };
+                parts.push(format!("status[]={}", urlencoding::encode(status_str)));
+            }
+        }
+
+        if let Some(symbol) = &self.underlying_symbol {
+            parts.push(format!("underlying-symbol={}", urlencoding::encode(symbol)));
+        }
+
+        if let Some(start) = &self.start_at {
+            parts.push(format!("start-at={}", start.to_rfc3339()));
+        }
+
+        if let Some(end) = &self.end_at {
+            parts.push(format!("end-at={}", end.to_rfc3339()));
+        }
+
+        if let Some(per_page) = self.per_page {
+            parts.push(format!("per-page={}", per_page));
+        }
+
+        if let Some(page_offset) = self.page_offset {
+            parts.push(format!("page-offset={}", page_offset));
+        }
+
+        parts.join("&")
+    }
 }
 
 impl OrdersService {
@@ -91,13 +134,20 @@ impl OrdersService {
             items: Vec<Order>,
         }
 
-        let path = format!("/accounts/{}/orders", account_number);
-
-        let response: Response = match query {
-            Some(q) => self.inner.get_with_query(&path, &q).await?,
-            None => self.inner.get(&path).await?,
+        let base_path = format!("/accounts/{}/orders", account_number);
+        let path = match query {
+            Some(q) => {
+                let query_string = q.to_query_string();
+                if query_string.is_empty() {
+                    base_path
+                } else {
+                    format!("{}?{}", base_path, query_string)
+                }
+            }
+            None => base_path,
         };
 
+        let response: Response = self.inner.get(&path).await?;
         Ok(response.items)
     }
 
@@ -209,11 +259,13 @@ impl OrdersService {
         // Cancel each one
         let mut cancelled = Vec::new();
         for order in live_orders {
-            if let Ok(cancelled_order) = self
-                .cancel(account_number, &OrderId::new(&order.id))
-                .await
-            {
-                cancelled.push(cancelled_order);
+            if let Some(id) = &order.id {
+                if let Ok(cancelled_order) = self
+                    .cancel(account_number, &OrderId::new(id))
+                    .await
+                {
+                    cancelled.push(cancelled_order);
+                }
             }
         }
 
@@ -240,7 +292,7 @@ impl OrdersService {
     ///
     /// while let Some(result) = stream.next().await {
     ///     let order = result?;
-    ///     println!("Order {}: {:?}", order.id, order.status);
+    ///     println!("Order {:?}: {:?}", order.id, order.status);
     /// }
     /// # Ok(())
     /// # }

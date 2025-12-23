@@ -91,6 +91,17 @@ impl TastytradeClient {
         Self::from_credentials(username, password, env).await
     }
 
+    /// Login with username/password and custom configuration.
+    pub async fn login_with_config(
+        username: impl Into<String>,
+        password: impl Into<String>,
+        env: Environment,
+        config: ClientConfig,
+    ) -> Result<Self> {
+        let session = Session::from_credentials(username, password, true, env).await?;
+        Self::with_session(session, config)
+    }
+
     /// Create a new client with an existing session and custom configuration.
     pub fn with_session(session: Session, config: ClientConfig) -> Result<Self> {
         let http = reqwest::Client::builder()
@@ -334,6 +345,17 @@ impl ClientInner {
             // Check for auth errors
             if status_code == 401 {
                 return Err(Error::SessionExpired);
+            }
+
+            // Check for not found errors
+            if status_code == 404 {
+                let message = body
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Resource not found")
+                    .to_string();
+                return Err(Error::NotFound(message));
             }
 
             Err(Error::from_api_response(status_code, body))

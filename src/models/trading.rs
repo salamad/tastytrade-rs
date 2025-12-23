@@ -2,9 +2,31 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::enums::{InstrumentType, PriceEffect, TransactionType};
+
+/// Helper to deserialize IDs that may come as integers or strings.
+fn deserialize_id<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdValue {
+        Int(i64),
+        String(String),
+        Null,
+    }
+
+    match IdValue::deserialize(deserializer)? {
+        IdValue::Int(i) => Ok(Some(i)),
+        IdValue::String(s) => s.parse::<i64>().map(Some).map_err(D::Error::custom),
+        IdValue::Null => Ok(None),
+    }
+}
 
 /// Effect on buying power from an order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,15 +213,19 @@ impl DryRunResponse {
 }
 
 /// Account transaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Transaction {
-    /// Transaction ID
-    pub id: String,
+    /// Transaction ID (can be integer or string from API)
+    #[serde(deserialize_with = "deserialize_id")]
+    #[serde(default)]
+    pub id: Option<i64>,
     /// Account number
+    #[serde(default)]
     pub account_number: String,
     /// Transaction type
-    pub transaction_type: TransactionType,
+    #[serde(default)]
+    pub transaction_type: Option<TransactionType>,
     /// Transaction sub-type
     #[serde(default)]
     pub transaction_sub_type: Option<String>,
@@ -307,6 +333,36 @@ pub struct WatchlistEntry {
     /// Instrument type
     #[serde(default)]
     pub instrument_type: Option<InstrumentType>,
+}
+
+impl WatchlistEntry {
+    /// Create a new watchlist entry.
+    pub fn new(symbol: impl Into<String>, instrument_type: Option<InstrumentType>) -> Self {
+        Self {
+            symbol: symbol.into(),
+            instrument_type,
+        }
+    }
+
+    /// Create an equity watchlist entry.
+    pub fn equity(symbol: impl Into<String>) -> Self {
+        Self::new(symbol, Some(InstrumentType::Equity))
+    }
+
+    /// Create an option watchlist entry.
+    pub fn option(symbol: impl Into<String>) -> Self {
+        Self::new(symbol, Some(InstrumentType::EquityOption))
+    }
+
+    /// Create a future watchlist entry.
+    pub fn future(symbol: impl Into<String>) -> Self {
+        Self::new(symbol, Some(InstrumentType::Future))
+    }
+
+    /// Create a cryptocurrency watchlist entry.
+    pub fn crypto(symbol: impl Into<String>) -> Self {
+        Self::new(symbol, Some(InstrumentType::Cryptocurrency))
+    }
 }
 
 /// Public watchlist (tastytrade curated).

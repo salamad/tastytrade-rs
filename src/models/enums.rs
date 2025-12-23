@@ -6,10 +6,11 @@
 use serde::{Deserialize, Serialize};
 
 /// Type of financial instrument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum InstrumentType {
     /// Common stock or ETF
     #[serde(rename = "Equity")]
+    #[default]
     Equity,
     /// Stock option contract
     #[serde(rename = "Equity Option")]
@@ -26,6 +27,12 @@ pub enum InstrumentType {
     /// Warrant
     #[serde(rename = "Warrant")]
     Warrant,
+    /// Index
+    #[serde(rename = "Index")]
+    Index,
+    /// Unknown instrument type
+    #[serde(other)]
+    Unknown,
 }
 
 impl InstrumentType {
@@ -284,9 +291,10 @@ pub enum PriceComparison {
 }
 
 /// Transaction type for account transactions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum TransactionType {
     /// Trade execution
+    #[default]
     Trade,
     /// Option expiration
     #[serde(rename = "Receive Deliver")]
@@ -300,7 +308,14 @@ pub enum TransactionType {
     MoneyMovement,
     /// Fee charged
     Fee,
+    /// Credit or debit
+    #[serde(rename = "Credit/Debit")]
+    CreditDebit,
+    /// Balance adjustment
+    #[serde(rename = "Balance Adjustment")]
+    BalanceAdjustment,
     /// Other transaction type
+    #[serde(other)]
     Other,
 }
 

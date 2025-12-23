@@ -161,20 +161,18 @@ impl AccountStreamer {
 
     async fn get_streamer_token(client: &ClientInner) -> Result<String> {
         #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
         struct TokenData {
             token: String,
-            #[serde(rename = "streamer-url")]
             #[allow(dead_code)]
             streamer_url: Option<String>,
+            #[allow(dead_code)]
+            level: Option<String>,
         }
 
-        #[derive(Deserialize)]
-        struct Response {
-            data: TokenData,
-        }
-
-        let response: Response = client.get("/api-quote-tokens").await?;
-        Ok(response.data.token)
+        // The API returns the token data directly (wrapped by our generic handler)
+        let response: TokenData = client.get("/api-quote-tokens").await?;
+        Ok(response.token)
     }
 
     async fn authenticate(

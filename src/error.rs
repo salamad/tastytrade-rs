@@ -90,6 +90,10 @@ pub enum Error {
     /// Configuration error
     #[error("Configuration error: {0}")]
     Config(String),
+
+    /// Resource not found (404)
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 impl Error {

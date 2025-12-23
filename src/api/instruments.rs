@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
-
 use crate::client::ClientInner;
 use crate::models::{
     Cryptocurrency, Equity, EquityOption, Future, FutureOption, NestedOptionChain,
@@ -35,19 +33,21 @@ impl InstrumentsService {
 
     /// Get equity instruments by symbols.
     pub async fn equities(&self, symbols: &[&str]) -> Result<Vec<Equity>> {
-        #[derive(Serialize)]
-        struct Query<'a> {
-            symbol: &'a [&'a str],
-        }
-
         #[derive(serde::Deserialize)]
         struct Response {
             items: Vec<Equity>,
         }
 
+        // Build query string manually for array parameters
+        let query_string = symbols
+            .iter()
+            .map(|s| format!("symbol[]={}", urlencoding::encode(s)))
+            .collect::<Vec<_>>()
+            .join("&");
+
         let response: Response = self
             .inner
-            .get_with_query("/instruments/equities", &Query { symbol: symbols })
+            .get(&format!("/instruments/equities?{}", query_string))
             .await?;
         Ok(response.items)
     }
@@ -61,19 +61,21 @@ impl InstrumentsService {
 
     /// Get equity options by symbols.
     pub async fn equity_options(&self, symbols: &[&str]) -> Result<Vec<EquityOption>> {
-        #[derive(Serialize)]
-        struct Query<'a> {
-            symbol: &'a [&'a str],
-        }
-
         #[derive(serde::Deserialize)]
         struct Response {
             items: Vec<EquityOption>,
         }
 
+        // Build query string manually for array parameters
+        let query_string = symbols
+            .iter()
+            .map(|s| format!("symbol[]={}", urlencoding::encode(s)))
+            .collect::<Vec<_>>()
+            .join("&");
+
         let response: Response = self
             .inner
-            .get_with_query("/instruments/equity-options", &Query { symbol: symbols })
+            .get(&format!("/instruments/equity-options?{}", query_string))
             .await?;
         Ok(response.items)
     }
@@ -101,21 +103,23 @@ impl InstrumentsService {
 
     /// Get futures contracts.
     pub async fn futures(&self, symbols: Option<&[&str]>) -> Result<Vec<Future>> {
-        #[derive(Serialize)]
-        struct Query<'a> {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            symbol: Option<&'a [&'a str]>,
-        }
-
         #[derive(serde::Deserialize)]
         struct Response {
             items: Vec<Future>,
         }
 
-        let response: Response = self
-            .inner
-            .get_with_query("/instruments/futures", &Query { symbol: symbols })
-            .await?;
+        let path = if let Some(syms) = symbols {
+            let query_string = syms
+                .iter()
+                .map(|s| format!("symbol[]={}", urlencoding::encode(s)))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("/instruments/futures?{}", query_string)
+        } else {
+            "/instruments/futures".to_string()
+        };
+
+        let response: Response = self.inner.get(&path).await?;
         Ok(response.items)
     }
 
@@ -140,19 +144,21 @@ impl InstrumentsService {
 
     /// Get futures options.
     pub async fn futures_options(&self, symbols: &[&str]) -> Result<Vec<FutureOption>> {
-        #[derive(Serialize)]
-        struct Query<'a> {
-            symbol: &'a [&'a str],
-        }
-
         #[derive(serde::Deserialize)]
         struct Response {
             items: Vec<FutureOption>,
         }
 
+        // Build query string manually for array parameters
+        let query_string = symbols
+            .iter()
+            .map(|s| format!("symbol[]={}", urlencoding::encode(s)))
+            .collect::<Vec<_>>()
+            .join("&");
+
         let response: Response = self
             .inner
-            .get_with_query("/instruments/future-options", &Query { symbol: symbols })
+            .get(&format!("/instruments/future-options?{}", query_string))
             .await?;
         Ok(response.items)
     }

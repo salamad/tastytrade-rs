@@ -6,14 +6,17 @@ use serde::{Deserialize, Serialize};
 use super::enums::{AuthorityLevel, MarginOrCash};
 
 /// Customer profile information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Customer {
     /// Customer's email address
+    #[serde(default)]
     pub email: String,
-    /// Customer's username
+    /// Customer's username (if available, also check `login` field)
+    #[serde(default)]
     pub username: String,
     /// External identifier
+    #[serde(default)]
     pub external_id: String,
     /// First name
     #[serde(default)]
@@ -27,26 +30,36 @@ pub struct Customer {
     /// Whether the customer has agreed to give up certain benefits
     #[serde(default)]
     pub agreed_to_margining: Option<bool>,
+    /// Customer ID
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Prefixes for accounts
+    #[serde(default)]
+    pub prefixes: Option<Vec<String>>,
 }
 
 /// Trading account information.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct Account {
     /// Unique account number
+    #[serde(default)]
     pub account_number: String,
     /// External identifier for the account
-    pub external_id: String,
+    #[serde(default)]
+    pub external_id: Option<String>,
     /// When the account was opened
-    pub opened_at: DateTime<Utc>,
+    #[serde(default)]
+    pub opened_at: Option<DateTime<Utc>>,
     /// User-defined nickname for the account
     #[serde(default)]
     pub nickname: Option<String>,
     /// Type of account (e.g., "Individual", "Joint")
-    pub account_type_name: String,
+    #[serde(default)]
+    pub account_type_name: Option<String>,
     /// Whether account is flagged as pattern day trader
     #[serde(default)]
-    pub day_trader_status: bool,
+    pub day_trader_status: Option<bool>,
     /// Whether this is a margin or cash account
     #[serde(default)]
     pub margin_or_cash: Option<MarginOrCash>,
@@ -55,22 +68,22 @@ pub struct Account {
     pub authority_level: Option<AuthorityLevel>,
     /// Whether this is a foreign account
     #[serde(default)]
-    pub is_foreign: bool,
+    pub is_foreign: Option<bool>,
     /// Whether this is a test/paper trading account
     #[serde(default)]
-    pub is_test_drive: bool,
+    pub is_test_drive: Option<bool>,
     /// Whether this account is closed
     #[serde(default)]
-    pub is_closed: bool,
+    pub is_closed: Option<bool>,
     /// Whether futures trading is enabled
     #[serde(default)]
-    pub is_futures_approved: bool,
+    pub is_futures_approved: Option<bool>,
     /// Whether the account is funded
     #[serde(default)]
-    pub is_firm_proprietary: bool,
+    pub is_firm_proprietary: Option<bool>,
     /// Whether the account is an IRA
     #[serde(default)]
-    pub is_ira: bool,
+    pub is_ira: Option<bool>,
     /// Investment objective
     #[serde(default)]
     pub investment_objective: Option<String>,
@@ -142,7 +155,7 @@ mod tests {
 
         let account: Account = serde_json::from_str(json).unwrap();
         assert_eq!(account.account_number, "5WV12345");
-        assert_eq!(account.account_type_name, "Individual");
-        assert!(account.is_test_drive);
+        assert_eq!(account.account_type_name, Some("Individual".to_string()));
+        assert_eq!(account.is_test_drive, Some(true));
     }
 }
