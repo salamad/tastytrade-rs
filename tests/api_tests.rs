@@ -1495,7 +1495,9 @@ mod client_config_tests {
 
     #[tokio::test]
     async fn test_client_with_custom_config() {
+        init_logging();
         let (username, password, _) = get_test_credentials();
+        let environment = get_test_environment();
 
         let config = ClientConfig {
             timeout: Duration::from_secs(60),
@@ -1509,7 +1511,7 @@ mod client_config_tests {
         let client = TastytradeClient::login_with_config(
             &username,
             &password,
-            Environment::Sandbox,
+            environment,
             config,
         ).await;
 
@@ -1535,10 +1537,13 @@ mod error_handling_tests {
 
     #[tokio::test]
     async fn test_invalid_credentials() {
+        init_logging();
+        let environment = get_test_environment();
+
         let result = TastytradeClient::login(
             "invalid_user",
             "invalid_password",
-            Environment::Sandbox,
+            environment,
         ).await;
 
         assert!(result.is_err(), "Should fail with invalid credentials");
