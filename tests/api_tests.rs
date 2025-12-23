@@ -3,11 +3,17 @@
 //! This test suite covers all REST API endpoints and WebSocket streaming features.
 //!
 //! Environment variables required:
-//! - TASTYTRADE_USERNAME: Username for sandbox authentication
-//! - TASTYTRADE_PASSWORD: Password for sandbox authentication
+//! - TASTYTRADE_USERNAME: Username for authentication
+//! - TASTYTRADE_PASSWORD: Password for authentication
 //! - TASTYTRADE_ACCOUNT: Account number for testing
 //!
+//! Optional environment variables:
+//! - TASTYTRADE_ENVIRONMENT: "sandbox" (default) or "production"
+//!
 //! Run with: cargo test --test api_tests -- --test-threads=1
+//!
+//! To run against production (excluding order placement tests):
+//! TASTYTRADE_ENVIRONMENT=production cargo test --test api_tests -- --skip test_place_and_cancel_order
 
 use std::env;
 use std::sync::Once;
@@ -52,12 +58,28 @@ fn get_test_credentials() -> (String, String, String) {
     (username, password, account)
 }
 
+/// Get the environment to use for testing
+fn get_test_environment() -> Environment {
+    match env::var("TASTYTRADE_ENVIRONMENT")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "production" | "prod" => {
+            tracing::warn!("Running tests against PRODUCTION environment");
+            Environment::Production
+        }
+        _ => Environment::Sandbox,
+    }
+}
+
 /// Create an authenticated client for testing
 async fn create_client() -> TastytradeClient {
     init_logging();
     let (username, password, _) = get_test_credentials();
+    let environment = get_test_environment();
 
-    TastytradeClient::login(&username, &password, Environment::Sandbox)
+    TastytradeClient::login(&username, &password, environment)
         .await
         .expect("Failed to create client")
 }
