@@ -275,6 +275,7 @@ impl Session {
         let response = client
             .delete(&url)
             .header("Authorization", inner.access_token.expose_secret())
+            .header("User-Agent", "tastytrade-rs/0.1.0")
             .send()
             .await?;
 
@@ -299,6 +300,7 @@ impl Session {
 
         let response = client
             .post(&url)
+            .header("User-Agent", "tastytrade-rs/0.1.0")
             .json(&serde_json::json!({
                 "grant_type": "refresh_token",
                 "client_secret": client_secret.expose_secret(),
@@ -331,8 +333,12 @@ impl Session {
         let client = reqwest::Client::new();
         let url = format!("{}/sessions", env.api_base_url());
 
+        tracing::debug!("Login attempt to: {} for user: {}", url, username);
+
         let response = client
             .post(&url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "tastytrade-rs/0.1.0")
             .json(&serde_json::json!({
                 "login": username,
                 "password": password,
@@ -341,12 +347,17 @@ impl Session {
             .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status().as_u16();
-            let body: serde_json::Value = response.json().await.unwrap_or_default();
+        let status = response.status();
+        tracing::debug!("Login response status: {}", status);
+
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let body_text = response.text().await.unwrap_or_default();
+            tracing::debug!("Login error body: {}", body_text);
+            let body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
             return Err(Error::Authentication(format!(
                 "Login failed ({}): {:?}",
-                status, body
+                status_code, body
             )));
         }
 
@@ -364,6 +375,7 @@ impl Session {
 
         let response = client
             .post(&url)
+            .header("User-Agent", "tastytrade-rs/0.1.0")
             .json(&serde_json::json!({
                 "login": username,
                 "remember-token": remember_token,

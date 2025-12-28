@@ -28,6 +28,26 @@ where
     }
 }
 
+/// Helper to deserialize IDs that may come as integers or strings, returning as String.
+fn deserialize_optional_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdValue {
+        Int(i64),
+        String(String),
+        Null,
+    }
+
+    match IdValue::deserialize(deserializer)? {
+        IdValue::Int(i) => Ok(Some(i.to_string())),
+        IdValue::String(s) => Ok(Some(s)),
+        IdValue::Null => Ok(None),
+    }
+}
+
 /// Effect on buying power from an order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -275,7 +295,7 @@ pub struct Transaction {
     #[serde(default)]
     pub commission_effect: Option<PriceEffect>,
     /// Order ID
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_int")]
     pub order_id: Option<String>,
     /// Execution ID
     #[serde(default)]

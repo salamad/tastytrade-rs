@@ -6,6 +6,26 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::enums::*;
 
+/// Helper to deserialize IDs that may come as integers or strings, returning as String.
+fn deserialize_optional_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdValue {
+        Int(i64),
+        String(String),
+        Null,
+    }
+
+    match IdValue::deserialize(deserializer)? {
+        IdValue::Int(i) => Ok(Some(i.to_string())),
+        IdValue::String(s) => Ok(Some(s)),
+        IdValue::Null => Ok(None),
+    }
+}
+
 /// Helper to deserialize timestamps that may come as integers (epoch ms) or strings.
 fn deserialize_optional_timestamp<'de, D>(deserializer: D) -> Result<Option<DateTime<Utc>>, D::Error>
 where
@@ -458,7 +478,7 @@ pub struct NewComplexOrder {
 #[serde(rename_all = "kebab-case")]
 pub struct Order {
     /// Order ID (not present in dry run responses)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string_or_int")]
     pub id: Option<String>,
     /// Account number
     #[serde(default)]

@@ -2,9 +2,39 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::enums::InstrumentType;
+
+/// Helper to deserialize i64 that may come as integers or strings (possibly with decimal points).
+fn deserialize_optional_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumValue {
+        Int(i64),
+        Float(f64),
+        String(String),
+        Null,
+    }
+
+    match NumValue::deserialize(deserializer)? {
+        NumValue::Int(i) => Ok(Some(i)),
+        NumValue::Float(f) => Ok(Some(f as i64)),
+        NumValue::String(s) if s.is_empty() => Ok(None),
+        NumValue::String(s) => {
+            // Handle strings like "21521802.0"
+            s.parse::<f64>()
+                .map(|f| Some(f as i64))
+                .map_err(D::Error::custom)
+        }
+        NumValue::Null => Ok(None),
+    }
+}
 
 /// Market data snapshot for an instrument.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,10 +87,10 @@ pub struct MarketData {
     #[serde(default)]
     pub percent_change: Option<Decimal>,
     /// Today's trading volume
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i64")]
     pub volume: Option<i64>,
     /// Open interest (for options/futures)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i64")]
     pub open_interest: Option<i64>,
     /// Implied volatility (for options)
     #[serde(default)]
@@ -194,7 +224,7 @@ pub struct MarketMetric {
     #[serde(default)]
     pub ex_dividend_date: Option<String>,
     /// Shares outstanding
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_i64")]
     pub shares_outstanding: Option<i64>,
     /// When the metrics were last updated
     #[serde(default)]

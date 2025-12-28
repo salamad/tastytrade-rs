@@ -17,11 +17,13 @@
 
 use std::env;
 use std::sync::Once;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use futures_util::StreamExt;
+use once_cell::sync::Lazy;
 use rust_decimal_macros::dec;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 
@@ -35,6 +37,40 @@ use tastytrade_rs::streaming::{
 use tastytrade_rs::RetryConfig;
 
 static INIT: Once = Once::new();
+
+/// Rate limiter to ensure we don't exceed 2 requests per second to TastyTrade API.
+/// This is a global mutex that tracks the last request time.
+static RATE_LIMITER: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+
+/// Shared client instance - created once and reused across all tests.
+/// This avoids rate limiting issues from creating multiple login sessions.
+static SHARED_CLIENT: OnceCell<TastytradeClient> = OnceCell::const_new();
+
+/// Minimum delay between API requests (1000ms = 1 request per second max for safety)
+const MIN_REQUEST_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// Wait if necessary to respect rate limits before making an API request.
+/// Call this before each API request to ensure we don't exceed 2 req/sec.
+async fn rate_limit() {
+    let mut last_request = RATE_LIMITER.lock().await;
+
+    if let Some(last) = *last_request {
+        let elapsed = last.elapsed();
+        if elapsed < MIN_REQUEST_INTERVAL {
+            let sleep_duration = MIN_REQUEST_INTERVAL - elapsed;
+            tokio::time::sleep(sleep_duration).await;
+        }
+    }
+
+    *last_request = Some(Instant::now());
+}
+
+/// Execute an API call with rate limiting applied.
+/// Use this for all API calls to ensure we don't exceed rate limits.
+async fn api<T>(future: impl std::future::Future<Output = T>) -> T {
+    rate_limit().await;
+    future.await
+}
 
 /// Initialize logging for tests
 fn init_logging() {
@@ -73,11 +109,34 @@ fn get_test_environment() -> Environment {
     }
 }
 
-/// Create an authenticated client for testing
+/// Get or create the shared client for testing.
+/// This creates the client once and reuses it across all tests to avoid
+/// excessive login requests that trigger rate limiting.
+/// Also applies rate limiting before returning the client.
+async fn get_shared_client() -> &'static TastytradeClient {
+    // Always apply rate limiting before any API operation
+    rate_limit().await;
+
+    SHARED_CLIENT.get_or_init(|| async {
+        init_logging();
+        let (username, password, _) = get_test_credentials();
+        let environment = get_test_environment();
+
+        TastytradeClient::login(&username, &password, environment)
+            .await
+            .expect("Failed to create client")
+    }).await
+}
+
+/// Create a new authenticated client for testing (use sparingly - prefer get_shared_client).
+/// Only use this for tests that specifically need a fresh client.
 async fn create_client() -> TastytradeClient {
     init_logging();
     let (username, password, _) = get_test_credentials();
     let environment = get_test_environment();
+
+    // Rate limit the login request
+    rate_limit().await;
 
     TastytradeClient::login(&username, &password, environment)
         .await
@@ -99,9 +158,9 @@ mod accounts_tests {
 
     #[tokio::test]
     async fn test_get_customer_profile() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let customer = client.accounts().me().await;
+        let customer = api(client.accounts().me()).await;
         assert!(customer.is_ok(), "Should get customer profile: {:?}", customer);
 
         let customer = customer.unwrap();
@@ -122,9 +181,9 @@ mod accounts_tests {
 
     #[tokio::test]
     async fn test_list_accounts() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let accounts = client.accounts().list().await;
+        let accounts = api(client.accounts().list()).await;
         assert!(accounts.is_ok(), "Should list accounts: {:?}", accounts);
 
         let accounts = accounts.unwrap();
@@ -141,10 +200,10 @@ mod accounts_tests {
 
     #[tokio::test]
     async fn test_get_specific_account() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account_number = get_test_account();
 
-        let account = client.accounts().get(&account_number).await;
+        let account = api(client.accounts().get(&account_number)).await;
         assert!(account.is_ok(), "Should get specific account: {:?}", account);
 
         let account = account.unwrap();
@@ -164,10 +223,10 @@ mod accounts_tests {
 
     #[tokio::test]
     async fn test_get_invalid_account() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let invalid_account = AccountNumber::new("INVALID123");
 
-        let result = client.accounts().get(&invalid_account).await;
+        let result = api(client.accounts().get(&invalid_account)).await;
         assert!(result.is_err(), "Should fail for invalid account");
     }
 }
@@ -181,10 +240,10 @@ mod balances_tests {
 
     #[tokio::test]
     async fn test_get_account_balance() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let balance = client.balances().get(&account).await;
+        let balance = api(client.balances().get(&account)).await;
         assert!(balance.is_ok(), "Should get account balance: {:?}", balance);
 
         let balance = balance.unwrap();
@@ -198,10 +257,10 @@ mod balances_tests {
 
     #[tokio::test]
     async fn test_get_positions() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let positions = client.balances().positions(&account).await;
+        let positions = api(client.balances().positions(&account)).await;
         assert!(positions.is_ok(), "Should get positions: {:?}", positions);
 
         let positions = positions.unwrap();
@@ -220,7 +279,7 @@ mod balances_tests {
 
     #[tokio::test]
     async fn test_get_balance_snapshots() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         // Get snapshots for the last 30 days
@@ -238,7 +297,7 @@ mod balances_tests {
 
     #[tokio::test]
     async fn test_get_balance_snapshots_no_dates() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let snapshots = client.balances()
@@ -249,7 +308,7 @@ mod balances_tests {
 
     #[tokio::test]
     async fn test_get_net_liq_history() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         // Test with different time periods
@@ -288,10 +347,10 @@ mod orders_tests {
 
     #[tokio::test]
     async fn test_list_orders() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let orders = client.orders().list(&account, None).await;
+        let orders = api(client.orders().list(&account, None)).await;
         assert!(orders.is_ok(), "Should list orders: {:?}", orders);
 
         let orders = orders.unwrap();
@@ -309,7 +368,7 @@ mod orders_tests {
 
     #[tokio::test]
     async fn test_list_orders_with_filters() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let query = OrdersQuery {
@@ -327,10 +386,10 @@ mod orders_tests {
 
     #[tokio::test]
     async fn test_list_live_orders() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let orders = client.orders().live(&account).await;
+        let orders = api(client.orders().live(&account)).await;
         assert!(orders.is_ok(), "Should list live orders: {:?}", orders);
 
         let orders = orders.unwrap();
@@ -339,7 +398,7 @@ mod orders_tests {
 
     #[tokio::test]
     async fn test_dry_run_equity_order() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         // Build a simple equity limit order
@@ -352,7 +411,7 @@ mod orders_tests {
             .build()
             .expect("Should build order");
 
-        let dry_run = client.orders().dry_run(&account, order).await;
+        let dry_run = api(client.orders().dry_run(&account, order)).await;
         assert!(dry_run.is_ok(), "Should dry run order: {:?}", dry_run);
 
         let dry_run = dry_run.unwrap();
@@ -365,7 +424,7 @@ mod orders_tests {
 
     #[tokio::test]
     async fn test_dry_run_market_order() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let order = NewOrderBuilder::new()
@@ -375,13 +434,13 @@ mod orders_tests {
             .build()
             .expect("Should build market order");
 
-        let dry_run = client.orders().dry_run(&account, order).await;
+        let dry_run = api(client.orders().dry_run(&account, order)).await;
         assert!(dry_run.is_ok(), "Should dry run market order: {:?}", dry_run);
     }
 
     #[tokio::test]
     async fn test_order_stream_pagination() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let query = OrdersQueryStream {
@@ -413,7 +472,7 @@ mod orders_tests {
 
     #[tokio::test]
     async fn test_place_and_cancel_order() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         // Place a very low limit order that won't execute
@@ -427,7 +486,7 @@ mod orders_tests {
             .expect("Should build order");
 
         // Place the order
-        let place_result = client.orders().place(&account, order).await;
+        let place_result = api(client.orders().place(&account, order)).await;
 
         match place_result {
             Ok(response) => {
@@ -436,7 +495,7 @@ mod orders_tests {
                 // Cancel the order if we have an ID
                 if let Some(id) = &response.order.id {
                     let order_id = OrderId::new(id);
-                    let cancel_result = client.orders().cancel(&account, &order_id).await;
+                    let cancel_result = api(client.orders().cancel(&account, &order_id)).await;
 
                     match cancel_result {
                         Ok(cancelled) => {
@@ -470,10 +529,10 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_equities() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         let symbols = &["AAPL", "TSLA", "GOOGL", "MSFT", "AMZN"];
-        let equities = client.instruments().equities(symbols).await;
+        let equities = api(client.instruments().equities(symbols)).await;
         assert!(equities.is_ok(), "Should get equities: {:?}", equities);
 
         let equities = equities.unwrap();
@@ -491,9 +550,9 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_single_equity() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let equity = client.instruments().equity("AAPL").await;
+        let equity = api(client.instruments().equity("AAPL")).await;
         assert!(equity.is_ok(), "Should get single equity: {:?}", equity);
 
         let equity = equity.unwrap();
@@ -503,9 +562,9 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_option_chain() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let chain = client.instruments().option_chain("AAPL").await;
+        let chain = api(client.instruments().option_chain("AAPL")).await;
         assert!(chain.is_ok(), "Should get option chain: {:?}", chain);
 
         let chain = chain.unwrap();
@@ -526,10 +585,10 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_equity_options() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // First get the option chain to find valid option symbols
-        let chain = client.instruments().option_chain("SPY").await;
+        let chain = api(client.instruments().option_chain("SPY")).await;
         if let Ok(chain) = chain {
             if let Some(exp) = chain.expirations.first() {
                 if let Some(strike) = exp.strikes.first() {
@@ -561,10 +620,10 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_futures() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // Get all available futures
-        let futures = client.instruments().futures(None).await;
+        let futures = api(client.instruments().futures(None)).await;
         assert!(futures.is_ok(), "Should get futures: {:?}", futures);
 
         let futures = futures.unwrap();
@@ -582,7 +641,7 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_specific_futures() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // Try to get specific E-mini S&P futures (common symbol)
         let futures = client.instruments().futures(Some(&["/ES"])).await;
@@ -599,9 +658,9 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_cryptocurrencies() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let cryptos = client.instruments().cryptocurrencies().await;
+        let cryptos = api(client.instruments().cryptocurrencies()).await;
         assert!(cryptos.is_ok(), "Should get cryptocurrencies: {:?}", cryptos);
 
         let cryptos = cryptos.unwrap();
@@ -618,9 +677,9 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_get_single_cryptocurrency() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let crypto = client.instruments().cryptocurrency("BTC/USD").await;
+        let crypto = api(client.instruments().cryptocurrency("BTC/USD")).await;
 
         match crypto {
             Ok(crypto) => {
@@ -635,9 +694,9 @@ mod instruments_tests {
 
     #[tokio::test]
     async fn test_invalid_equity_symbol() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let result = client.instruments().equity("INVALIDXYZ123").await;
+        let result = api(client.instruments().equity("INVALIDXYZ123")).await;
         assert!(result.is_err(), "Should fail for invalid symbol");
     }
 }
@@ -651,7 +710,7 @@ mod market_data_tests {
 
     #[tokio::test]
     async fn test_get_equity_quote() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         let quote = client.market_data()
             .get("AAPL", InstrumentType::Equity)
@@ -669,7 +728,7 @@ mod market_data_tests {
 
     #[tokio::test]
     async fn test_get_multiple_equity_quotes() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         let symbols = &["AAPL", "TSLA", "GOOGL", "MSFT"];
         let quotes = client.market_data()
@@ -698,7 +757,7 @@ mod market_data_tests {
 
     #[tokio::test]
     async fn test_equity_quotes_convenience() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         let quotes = client.market_data()
             .equities(&["SPY", "QQQ", "IWM"])
@@ -708,10 +767,10 @@ mod market_data_tests {
 
     #[tokio::test]
     async fn test_option_quotes() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // First get a valid option symbol
-        let chain = client.instruments().option_chain("SPY").await;
+        let chain = api(client.instruments().option_chain("SPY")).await;
         if let Ok(chain) = chain {
             if let Some(exp) = chain.expirations.first() {
                 if let Some(strike) = exp.strikes.first() {
@@ -744,7 +803,7 @@ mod market_data_tests {
 
     #[tokio::test]
     async fn test_too_many_symbols_error() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // Create 101 symbols to exceed the limit
         let symbols: Vec<String> = (0..101).map(|i| format!("SYM{}", i)).collect();
@@ -767,10 +826,10 @@ mod transactions_tests {
 
     #[tokio::test]
     async fn test_list_transactions() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let transactions = client.transactions().list(&account, None).await;
+        let transactions = api(client.transactions().list(&account, None)).await;
         assert!(transactions.is_ok(), "Should list transactions: {:?}", transactions);
 
         let transactions = transactions.unwrap();
@@ -788,7 +847,7 @@ mod transactions_tests {
 
     #[tokio::test]
     async fn test_list_transactions_with_filters() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let query = TransactionsQuery {
@@ -809,10 +868,10 @@ mod transactions_tests {
 
     #[tokio::test]
     async fn test_get_total_fees() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let fees = client.transactions().total_fees(&account).await;
+        let fees = api(client.transactions().total_fees(&account)).await;
         assert!(fees.is_ok(), "Should get total fees: {:?}", fees);
 
         let fees = fees.unwrap();
@@ -826,7 +885,7 @@ mod transactions_tests {
 
     #[tokio::test]
     async fn test_transaction_stream_pagination() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let query = TransactionsQueryStream {
@@ -867,9 +926,9 @@ mod watchlists_tests {
 
     #[tokio::test]
     async fn test_get_public_watchlists() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let watchlists = client.watchlists().public().await;
+        let watchlists = api(client.watchlists().public()).await;
         assert!(watchlists.is_ok(), "Should get public watchlists: {:?}", watchlists);
 
         let watchlists = watchlists.unwrap();
@@ -882,9 +941,9 @@ mod watchlists_tests {
 
     #[tokio::test]
     async fn test_list_user_watchlists() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let watchlists = client.watchlists().list().await;
+        let watchlists = api(client.watchlists().list()).await;
         assert!(watchlists.is_ok(), "Should list user watchlists: {:?}", watchlists);
 
         let watchlists = watchlists.unwrap();
@@ -893,7 +952,7 @@ mod watchlists_tests {
 
     #[tokio::test]
     async fn test_create_update_delete_watchlist() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         let watchlist_name = format!("test_watchlist_{}", Utc::now().timestamp());
 
@@ -934,11 +993,11 @@ mod watchlists_tests {
                 }
 
                 // Get the watchlist
-                let retrieved = client.watchlists().get(&watchlist_name).await;
+                let retrieved = api(client.watchlists().get(&watchlist_name)).await;
                 assert!(retrieved.is_ok(), "Should retrieve watchlist");
 
                 // Delete watchlist
-                let deleted = client.watchlists().delete(&watchlist_name).await;
+                let deleted = api(client.watchlists().delete(&watchlist_name)).await;
                 match deleted {
                     Ok(()) => {
                         tracing::info!("Deleted watchlist: {}", watchlist_name);
@@ -964,9 +1023,9 @@ mod metrics_tests {
 
     #[tokio::test]
     async fn test_get_market_metrics() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let metrics = client.metrics().get(&["AAPL", "SPY", "QQQ"]).await;
+        let metrics = api(client.metrics().get(&["AAPL", "SPY", "QQQ"])).await;
 
         // Metrics endpoint may not be available in sandbox
         match &metrics {
@@ -992,9 +1051,9 @@ mod metrics_tests {
 
     #[tokio::test]
     async fn test_get_single_metric() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let metric = client.metrics().get_one("AAPL").await;
+        let metric = api(client.metrics().get_one("AAPL")).await;
 
         // Metrics endpoint may not be available in sandbox
         match &metric {
@@ -1016,9 +1075,9 @@ mod metrics_tests {
 
     #[tokio::test]
     async fn test_get_historical_volatility() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let volatility = client.metrics().historical_volatility("AAPL").await;
+        let volatility = api(client.metrics().historical_volatility("AAPL")).await;
 
         match volatility {
             Ok(data) => {
@@ -1051,9 +1110,9 @@ mod search_tests {
 
     #[tokio::test]
     async fn test_search_symbols() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let results = client.search().search("AAPL").await;
+        let results = api(client.search().search("AAPL")).await;
         assert!(results.is_ok(), "Should search symbols: {:?}", results);
 
         let results = results.unwrap();
@@ -1070,9 +1129,9 @@ mod search_tests {
 
     #[tokio::test]
     async fn test_search_by_name() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let results = client.search().search("Apple").await;
+        let results = api(client.search().search("Apple")).await;
         assert!(results.is_ok(), "Should search by name: {:?}", results);
 
         let results = results.unwrap();
@@ -1081,9 +1140,9 @@ mod search_tests {
 
     #[tokio::test]
     async fn test_search_no_results() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let results = client.search().search("XYZNONEXISTENT123").await;
+        let results = api(client.search().search("XYZNONEXISTENT123")).await;
         assert!(results.is_ok(), "Should handle no results gracefully");
 
         let results = results.unwrap();
@@ -1100,9 +1159,9 @@ mod dxlink_streaming_tests {
 
     #[tokio::test]
     async fn test_dxlink_connect_and_subscribe_quotes() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().dxlink().await
+        let mut streamer = api(client.streaming().dxlink()).await
             .expect("Should connect to DXLink");
 
         // Subscribe to quotes
@@ -1159,9 +1218,9 @@ mod dxlink_streaming_tests {
 
     #[tokio::test]
     async fn test_dxlink_subscribe_trades() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().dxlink().await
+        let mut streamer = api(client.streaming().dxlink()).await
             .expect("Should connect to DXLink");
 
         // Subscribe to trades
@@ -1204,9 +1263,9 @@ mod dxlink_streaming_tests {
 
     #[tokio::test]
     async fn test_dxlink_subscribe_summary() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().dxlink().await
+        let mut streamer = api(client.streaming().dxlink()).await
             .expect("Should connect to DXLink");
 
         // Subscribe to summary
@@ -1250,9 +1309,9 @@ mod dxlink_streaming_tests {
 
     #[tokio::test]
     async fn test_dxlink_subscribe_profile() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().dxlink().await
+        let mut streamer = api(client.streaming().dxlink()).await
             .expect("Should connect to DXLink");
 
         // Subscribe to profile
@@ -1287,9 +1346,9 @@ mod dxlink_streaming_tests {
 
     #[tokio::test]
     async fn test_dxlink_unsubscribe() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().dxlink().await
+        let mut streamer = api(client.streaming().dxlink()).await
             .expect("Should connect to DXLink");
 
         // Subscribe
@@ -1305,9 +1364,9 @@ mod dxlink_streaming_tests {
 
     #[tokio::test]
     async fn test_dxlink_multiple_subscriptions() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().dxlink().await
+        let mut streamer = api(client.streaming().dxlink()).await
             .expect("Should connect to DXLink");
 
         // Subscribe to multiple event types
@@ -1360,9 +1419,9 @@ mod account_streamer_tests {
 
     #[tokio::test]
     async fn test_account_streamer_connect() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().account().await
+        let mut streamer = api(client.streaming().account()).await
             .expect("Should connect to account streamer");
 
         let _ = streamer.close().await;
@@ -1370,10 +1429,10 @@ mod account_streamer_tests {
 
     #[tokio::test]
     async fn test_account_streamer_subscribe() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let mut streamer = client.streaming().account().await
+        let mut streamer = api(client.streaming().account()).await
             .expect("Should connect to account streamer");
 
         // Subscribe to account updates
@@ -1418,10 +1477,10 @@ mod account_streamer_tests {
 
     #[tokio::test]
     async fn test_account_streamer_unsubscribe() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let mut streamer = client.streaming().account().await
+        let mut streamer = api(client.streaming().account()).await
             .expect("Should connect to account streamer");
 
         // Subscribe
@@ -1437,9 +1496,9 @@ mod account_streamer_tests {
 
     #[tokio::test]
     async fn test_account_streamer_quote_alerts() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
-        let mut streamer = client.streaming().account().await
+        let mut streamer = api(client.streaming().account()).await
             .expect("Should connect to account streamer");
 
         // Subscribe to quote alerts
@@ -1451,10 +1510,10 @@ mod account_streamer_tests {
 
     #[tokio::test]
     async fn test_account_streamer_heartbeat() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
-        let mut streamer = client.streaming().account().await
+        let mut streamer = api(client.streaming().account()).await
             .expect("Should connect to account streamer");
 
         streamer.subscribe(&account).await
@@ -1508,6 +1567,9 @@ mod client_config_tests {
             ..Default::default()
         };
 
+        // Rate limit before login
+        rate_limit().await;
+
         let client = TastytradeClient::login_with_config(
             &username,
             &password,
@@ -1520,10 +1582,10 @@ mod client_config_tests {
 
     #[tokio::test]
     async fn test_client_session() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // Session should be valid after login
-        let customer = client.accounts().me().await;
+        let customer = api(client.accounts().me()).await;
         assert!(customer.is_ok(), "Session should be valid");
     }
 }
@@ -1540,6 +1602,9 @@ mod error_handling_tests {
         init_logging();
         let environment = get_test_environment();
 
+        // Rate limit before login attempt
+        rate_limit().await;
+
         let result = TastytradeClient::login(
             "invalid_user",
             "invalid_password",
@@ -1551,11 +1616,11 @@ mod error_handling_tests {
 
     #[tokio::test]
     async fn test_api_error_handling() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let invalid_account = AccountNumber::new("NOTREAL123");
 
         // Should return an error for invalid account
-        let result = client.balances().get(&invalid_account).await;
+        let result = api(client.balances().get(&invalid_account)).await;
         assert!(result.is_err(), "Should return error for invalid account");
 
         if let Err(e) = result {
@@ -1586,7 +1651,7 @@ mod pagination_tests {
 
     #[tokio::test]
     async fn test_orders_pagination() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         // Test with small page size
@@ -1616,7 +1681,7 @@ mod pagination_tests {
 
     #[tokio::test]
     async fn test_transactions_pagination() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         let query = TransactionsQuery {
@@ -1639,7 +1704,7 @@ mod concurrent_tests {
 
     #[tokio::test]
     async fn test_concurrent_requests() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
         let account = get_test_account();
 
         // Get service references
@@ -1671,11 +1736,11 @@ mod concurrent_tests {
 
     #[tokio::test]
     async fn test_rapid_sequential_requests() {
-        let client = create_client().await;
+        let client = get_shared_client().await;
 
         // Make rapid sequential requests
         for i in 0..5 {
-            let result = client.accounts().me().await;
+            let result = api(client.accounts().me()).await;
             assert!(result.is_ok(), "Request {} should succeed", i);
         }
     }
