@@ -299,6 +299,121 @@ async fn main() -> tastytrade_rs::Result<()> {
 }
 ```
 
+### Market Metrics with IV by Expiration
+
+```rust
+use tastytrade_rs::{TastytradeClient, Environment};
+
+#[tokio::main]
+async fn main() -> tastytrade_rs::Result<()> {
+    let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
+
+    // Get market metrics including IV data per expiration
+    let metrics = client.metrics().get(&["SPY", "AAPL"]).await?;
+
+    for metric in metrics {
+        println!("{}: IV Rank={:?}, Liquidity Rating={:?}",
+            metric.symbol,
+            metric.effective_iv_rank(),
+            metric.liquidity_rating
+        );
+
+        // Check liquidity
+        if metric.has_good_liquidity() {
+            println!("  Good liquidity for options trading");
+        }
+
+        // IV by expiration date
+        for exp_iv in &metric.option_expiration_implied_volatilities {
+            println!("  Expiration {:?}: IV={:?}",
+                exp_iv.expiration_date,
+                exp_iv.implied_volatility
+            );
+        }
+    }
+
+    Ok(())
+}
+```
+
+### Option Greeks (Detailed Quotes)
+
+Get detailed quotes with full Greeks for option contracts:
+
+```rust
+use tastytrade_rs::{TastytradeClient, Environment};
+
+#[tokio::main]
+async fn main() -> tastytrade_rs::Result<()> {
+    let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
+
+    // Get detailed quote with Greeks for an option
+    let quotes = client.market_data()
+        .options_detailed(&["AAPL  250117C00200000"])
+        .await?;
+
+    for quote in quotes {
+        println!("{}", quote.symbol);
+        println!("  Bid: {:?} x {:?}", quote.bid, quote.bid_size);
+        println!("  Ask: {:?} x {:?}", quote.ask, quote.ask_size);
+        println!("  Greeks:");
+        println!("    Delta: {:?}", quote.delta);
+        println!("    Gamma: {:?}", quote.gamma);
+        println!("    Theta: {:?}", quote.theta);
+        println!("    Vega:  {:?}", quote.vega);
+        println!("    Rho:   {:?}", quote.rho);
+        println!("  IV: {:?}", quote.volatility);
+        println!("  Theo Price: {:?}", quote.theo_price);
+        println!("  Open Interest: {:?}", quote.open_interest);
+    }
+
+    Ok(())
+}
+```
+
+### Market Sessions
+
+Check if the market is open and get trading hours:
+
+```rust
+use tastytrade_rs::{TastytradeClient, Environment};
+
+#[tokio::main]
+async fn main() -> tastytrade_rs::Result<()> {
+    let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
+
+    // Get current equity market session
+    let session = client.market_time().current_equities_session().await?;
+
+    println!("Market state: {:?}", session.state);
+    println!("Opens at: {:?}", session.open_at);
+    println!("Closes at: {:?}", session.close_at);
+
+    // Check market status
+    if session.is_open() {
+        println!("Market is OPEN for trading!");
+    } else if session.is_pre_market() {
+        println!("Pre-market session");
+    } else if session.is_after_hours() {
+        println!("After-hours trading");
+    } else {
+        println!("Market is CLOSED");
+
+        // Show next session
+        if let Some(next) = &session.next_session {
+            println!("Next session: {:?}", next.session_date);
+            println!("  Opens at: {:?}", next.open_at);
+        }
+    }
+
+    // Quick check if market is open
+    let is_open = client.market_time().is_market_open().await?;
+    println!("Is market open: {}", is_open);
+
+    Ok(())
+}
+```
+
 ### Search Symbols
 
 ```rust
@@ -529,7 +644,9 @@ async fn main() -> tastytrade_rs::Result<()> {
 | Positions | List, Get | Complete |
 | Orders | Place, Cancel, Replace, Dry Run, Stream | Complete |
 | Instruments | Equities, Options, Futures, Crypto | Complete |
-| Market Data | Quotes, Greeks, Metrics | Complete |
+| Market Data | Quotes, Detailed Quotes with Greeks | Complete |
+| Market Metrics | IV Rank, Liquidity, IV by Expiration | Complete |
+| Market Time | Equity Sessions, Market Hours, State | Complete |
 | Option Chains | Flat, Nested, Compact | Complete |
 | Transactions | List, Get, Fees, Stream | Complete |
 | Watchlists | Public, User, CRUD | Complete |
