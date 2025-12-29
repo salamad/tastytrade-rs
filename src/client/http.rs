@@ -7,7 +7,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::sync::Arc;
 
 use crate::api::{
-    AccountsService, BalancesService, InstrumentsService, MarketDataService,
+    AccountsService, BalancesService, InstrumentsService, MarketDataService, MarketTimeService,
     MetricsService, OrdersService, SearchService, TransactionsService, WatchlistsService,
 };
 use crate::auth::Session;
@@ -161,6 +161,11 @@ impl TastytradeClient {
     /// Get the symbol search service.
     pub fn search(&self) -> SearchService {
         SearchService::new(self.inner.clone())
+    }
+
+    /// Get the market time service for trading session information.
+    pub fn market_time(&self) -> MarketTimeService {
+        MarketTimeService::new(self.inner.clone())
     }
 
     /// Get the streaming services.

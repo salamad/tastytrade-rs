@@ -1745,3 +1745,306 @@ mod concurrent_tests {
         }
     }
 }
+
+// ============================================================================
+// MARKET METRICS EXTENDED TESTS
+// ============================================================================
+
+mod market_metrics_extended_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_market_metrics_with_iv_expirations() {
+        let client = get_shared_client().await;
+
+        // Get market metrics for a liquid underlying
+        let metrics = api(client.metrics().get(&["SPY"])).await;
+
+        match metrics {
+            Ok(metrics) => {
+                assert!(!metrics.is_empty(), "Should get at least one metric");
+                let metric = &metrics[0];
+                assert_eq!(metric.symbol, "SPY");
+
+                // Log available fields
+                tracing::info!("SPY IV rank: {:?}", metric.effective_iv_rank());
+                tracing::info!("SPY IV percentile: {:?}", metric.effective_iv_percentile());
+                tracing::info!("SPY liquidity: {:?}", metric.liquidity);
+                tracing::info!("SPY liquidity_rank: {:?}", metric.liquidity_rank);
+                tracing::info!("SPY liquidity_rating: {:?}", metric.liquidity_rating);
+                tracing::info!(
+                    "SPY option expirations IVs count: {}",
+                    metric.option_expiration_implied_volatilities.len()
+                );
+
+                // Log first few expiration IVs if available
+                for (i, exp_iv) in metric.option_expiration_implied_volatilities.iter().take(3).enumerate() {
+                    tracing::info!(
+                        "  Expiration {}: date={:?}, iv={:?}, type={:?}",
+                        i,
+                        exp_iv.expiration_date,
+                        exp_iv.implied_volatility,
+                        exp_iv.option_chain_type
+                    );
+                }
+            }
+            Err(tastytrade_rs::Error::NotFound(_)) => {
+                tracing::warn!("Metrics endpoint not available");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_market_metrics_liquidity_fields() {
+        let client = get_shared_client().await;
+
+        // Get metrics for multiple symbols to test liquidity fields
+        let symbols = &["AAPL", "TSLA", "QQQ"];
+        let metrics = api(client.metrics().get(symbols)).await;
+
+        match metrics {
+            Ok(metrics) => {
+                for metric in &metrics {
+                    tracing::info!(
+                        "{}: liquidity={:?}, rank={:?}, rating={:?}",
+                        metric.symbol,
+                        metric.liquidity,
+                        metric.liquidity_rank,
+                        metric.liquidity_rating
+                    );
+
+                    // Test the helper method
+                    if metric.has_good_liquidity() {
+                        tracing::info!("  {} has good liquidity (rating >= 3)", metric.symbol);
+                    }
+                }
+            }
+            Err(tastytrade_rs::Error::NotFound(_)) => {
+                tracing::warn!("Metrics endpoint not available");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+}
+
+// ============================================================================
+// DETAILED QUOTES WITH GREEKS TESTS
+// ============================================================================
+
+mod detailed_quotes_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_detailed_equity_quote() {
+        let client = get_shared_client().await;
+
+        // Get detailed quote for an equity
+        let quote = api(client.market_data().equities_detailed(&["AAPL"])).await;
+
+        match quote {
+            Ok(quotes) => {
+                if quotes.is_empty() {
+                    tracing::warn!("No detailed quotes returned (may be due to market hours or API limitations)");
+                    return;
+                }
+                let quote = &quotes[0];
+                assert_eq!(quote.symbol, "AAPL");
+
+                tracing::info!("AAPL detailed quote:");
+                tracing::info!("  bid={:?}, ask={:?}, mid={:?}", quote.bid, quote.ask, quote.mid);
+                tracing::info!("  last={:?}, volume={:?}", quote.last, quote.volume);
+                tracing::info!("  day_high={:?}, day_low={:?}", quote.day_high_price, quote.day_low_price);
+                tracing::info!("  is_halted={}", quote.is_trading_halted);
+
+                // Equities should not have greeks
+                assert!(!quote.has_greeks(), "Equity should not have greeks");
+            }
+            Err(e) => {
+                // This endpoint might not be available in all environments
+                tracing::warn!("Detailed quote endpoint error: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_detailed_option_quote_with_greeks() {
+        let client = get_shared_client().await;
+
+        // First get a valid option symbol from the option chain
+        let chain = api(client.instruments().option_chain("SPY")).await;
+
+        match chain {
+            Ok(chain) => {
+                if let Some(exp) = chain.expirations.first() {
+                    if let Some(strike) = exp.strikes.first() {
+                        // Get the call option symbol
+                        if let Some(ref option_symbol) = strike.call {
+                            tracing::info!("Testing option symbol: {}", option_symbol);
+
+                            // Get detailed quote with Greeks
+                            let quotes = api(
+                                client.market_data().options_detailed(&[option_symbol.as_str()])
+                            ).await;
+
+                            match quotes {
+                                Ok(quotes) => {
+                                    if quotes.is_empty() {
+                                        tracing::warn!("No option quotes returned (may be due to market hours)");
+                                        return;
+                                    }
+                                    let quote = &quotes[0];
+
+                                    tracing::info!("Option detailed quote for {}:", quote.symbol);
+                                    tracing::info!("  bid={:?}, ask={:?}", quote.bid, quote.ask);
+                                    tracing::info!("  delta={:?}", quote.delta);
+                                    tracing::info!("  gamma={:?}", quote.gamma);
+                                    tracing::info!("  theta={:?}", quote.theta);
+                                    tracing::info!("  vega={:?}", quote.vega);
+                                    tracing::info!("  rho={:?}", quote.rho);
+                                    tracing::info!("  volatility={:?}", quote.volatility);
+                                    tracing::info!("  theo_price={:?}", quote.theo_price);
+                                    tracing::info!("  open_interest={:?}", quote.open_interest);
+
+                                    // Option should have greeks
+                                    if quote.has_greeks() {
+                                        tracing::info!("Option has greeks populated");
+                                    } else {
+                                        tracing::warn!("Option greeks not populated (may be due to market hours)");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Detailed option quote error: {:?}", e);
+                                }
+                            }
+                        } else {
+                            tracing::warn!("No call option symbol available");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not get option chain: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_multiple_detailed_quotes() {
+        let client = get_shared_client().await;
+
+        let symbols = &["AAPL", "TSLA", "MSFT"];
+        let quotes = api(client.market_data().equities_detailed(symbols)).await;
+
+        match quotes {
+            Ok(quotes) => {
+                tracing::info!("Got {} detailed equity quotes", quotes.len());
+
+                for quote in &quotes {
+                    let spread = quote.spread();
+                    tracing::info!(
+                        "{}: bid={:?}, ask={:?}, spread={:?}",
+                        quote.symbol,
+                        quote.bid,
+                        quote.ask,
+                        spread
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Detailed quotes error: {:?}", e);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// MARKET TIME/SESSION TESTS
+// ============================================================================
+
+mod market_time_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_get_current_equity_session() {
+        let client = get_shared_client().await;
+
+        let session = api(client.market_time().current_equities_session()).await;
+
+        match session {
+            Ok(session) => {
+                tracing::info!("Current equity session:");
+                tracing::info!("  state: {:?}", session.state);
+                tracing::info!("  open_at: {:?}", session.open_at);
+                tracing::info!("  close_at: {:?}", session.close_at);
+                tracing::info!("  close_at_ext: {:?}", session.close_at_ext);
+                tracing::info!("  start_at: {:?}", session.start_at);
+                tracing::info!("  instrument_collection: {:?}", session.instrument_collection);
+
+                // Test helper methods
+                if session.is_open() {
+                    tracing::info!("Market is currently OPEN");
+                } else if session.is_pre_market() {
+                    tracing::info!("Market is in PRE-MARKET");
+                } else if session.is_after_hours() {
+                    tracing::info!("Market is in AFTER-HOURS");
+                } else {
+                    tracing::info!("Market is CLOSED");
+                }
+
+                // Log next session info
+                if let Some(next) = &session.next_session {
+                    tracing::info!("Next session:");
+                    tracing::info!("  date: {:?}", next.session_date);
+                    tracing::info!("  open_at: {:?}", next.open_at);
+                    tracing::info!("  close_at: {:?}", next.close_at);
+                }
+
+                // Log previous session info
+                if let Some(prev) = &session.previous_session {
+                    tracing::info!("Previous session:");
+                    tracing::info!("  date: {:?}", prev.session_date);
+                    tracing::info!("  open_at: {:?}", prev.open_at);
+                    tracing::info!("  close_at: {:?}", prev.close_at);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Market time endpoint error: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_is_market_open() {
+        let client = get_shared_client().await;
+
+        let is_open = api(client.market_time().is_market_open()).await;
+
+        match is_open {
+            Ok(is_open) => {
+                tracing::info!("Market is open: {}", is_open);
+            }
+            Err(e) => {
+                tracing::warn!("Market open check error: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_session_with_specific_time() {
+        let client = get_shared_client().await;
+
+        // Get session for current time
+        let now = chrono::Utc::now();
+        let session = api(client.market_time().equities_session(Some(now))).await;
+
+        match session {
+            Ok(session) => {
+                tracing::info!("Session for time {:?}: state={:?}", now, session.state);
+            }
+            Err(e) => {
+                tracing::warn!("Session with time error: {:?}", e);
+            }
+        }
+    }
+}

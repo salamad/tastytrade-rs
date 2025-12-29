@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::client::ClientInner;
-use crate::models::{InstrumentType, MarketData};
+use crate::models::{DetailedQuote, InstrumentType, MarketData};
 use crate::{Error, Result};
 
 /// Maximum number of symbols per request.
@@ -108,5 +108,125 @@ impl MarketDataService {
     pub async fn crypto(&self, symbols: &[&str]) -> Result<Vec<MarketData>> {
         self.get_many(symbols, InstrumentType::Cryptocurrency)
             .await
+    }
+
+    /// Get detailed quote with Greeks for a single symbol using /market-data/by-type.
+    ///
+    /// This endpoint returns more detailed data including option Greeks
+    /// (delta, gamma, theta, vega, rho) when querying option contracts.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: tastytrade_rs::TastytradeClient) -> tastytrade_rs::Result<()> {
+    /// // Get detailed quote with Greeks for an option
+    /// let quote = client.market_data()
+    ///     .get_detailed("AAPL  250117C00200000", "Equity Option")
+    ///     .await?;
+    /// println!("Delta: {:?}, Gamma: {:?}", quote.delta, quote.gamma);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_detailed(
+        &self,
+        symbol: &str,
+        instrument_type: &str,
+    ) -> Result<DetailedQuote> {
+        let quotes = self.get_detailed_many(&[symbol], instrument_type).await?;
+        quotes
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::InvalidSymbol(symbol.to_string()))
+    }
+
+    /// Get detailed quotes with Greeks for multiple symbols using /market-data/by-type.
+    ///
+    /// This endpoint returns more detailed data including option Greeks
+    /// (delta, gamma, theta, vega, rho) when querying option contracts.
+    ///
+    /// # Arguments
+    ///
+    /// * `symbols` - List of symbols to query
+    /// * `instrument_type` - The instrument type string (e.g., "Equity Option", "Equity", "Future")
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # async fn example(client: tastytrade_rs::TastytradeClient) -> tastytrade_rs::Result<()> {
+    /// // Get detailed quotes with Greeks for multiple options
+    /// let quotes = client.market_data()
+    ///     .get_detailed_many(
+    ///         &["AAPL  250117C00200000", "AAPL  250117P00200000"],
+    ///         "Equity Option"
+    ///     )
+    ///     .await?;
+    /// for quote in quotes {
+    ///     println!("{}: delta={:?}, theta={:?}", quote.symbol, quote.delta, quote.theta);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_detailed_many(
+        &self,
+        symbols: &[&str],
+        instrument_type: &str,
+    ) -> Result<Vec<DetailedQuote>> {
+        if symbols.len() > MAX_SYMBOLS_PER_REQUEST {
+            return Err(Error::InvalidInput(format!(
+                "Too many symbols. Maximum is {}, got {}",
+                MAX_SYMBOLS_PER_REQUEST,
+                symbols.len()
+            )));
+        }
+
+        #[derive(Serialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Query {
+            #[serde(rename = "symbols[]")]
+            symbols: Vec<String>,
+            instrument_type: String,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct Response {
+            items: Vec<DetailedQuote>,
+        }
+
+        // Build query string manually since we need symbols[] format
+        let symbols_query: String = symbols
+            .iter()
+            .map(|s| format!("symbols[]={}", urlencoding::encode(s)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let path = format!(
+            "/market-data/by-type?{}&instrument-type={}",
+            symbols_query,
+            urlencoding::encode(instrument_type)
+        );
+
+        let response: Response = self.inner.get(&path).await?;
+        Ok(response.items)
+    }
+
+    /// Get detailed option quotes with Greeks.
+    ///
+    /// Convenience method for getting detailed quotes for equity options.
+    pub async fn options_detailed(&self, symbols: &[&str]) -> Result<Vec<DetailedQuote>> {
+        self.get_detailed_many(symbols, "Equity Option").await
+    }
+
+    /// Get detailed equity quotes.
+    ///
+    /// Convenience method for getting detailed quotes for equities.
+    pub async fn equities_detailed(&self, symbols: &[&str]) -> Result<Vec<DetailedQuote>> {
+        self.get_detailed_many(symbols, "Equity").await
+    }
+
+    /// Get detailed futures quotes.
+    ///
+    /// Convenience method for getting detailed quotes for futures.
+    pub async fn futures_detailed(&self, symbols: &[&str]) -> Result<Vec<DetailedQuote>> {
+        self.get_detailed_many(symbols, "Future").await
     }
 }
