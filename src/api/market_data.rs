@@ -179,31 +179,26 @@ impl MarketDataService {
             )));
         }
 
-        #[derive(Serialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct Query {
-            #[serde(rename = "symbols[]")]
-            symbols: Vec<String>,
-            instrument_type: String,
-        }
-
         #[derive(serde::Deserialize)]
         struct Response {
             items: Vec<DetailedQuote>,
         }
 
-        // Build query string manually since we need symbols[] format
+        // Convert instrument type to API parameter name format
+        // e.g., "Equity Option" -> "equity-option[]", "Equity" -> "equity[]"
+        let param_name = format!(
+            "{}[]",
+            instrument_type.to_lowercase().replace(' ', "-")
+        );
+
+        // Build query string with the instrument-type-based parameter name
         let symbols_query: String = symbols
             .iter()
-            .map(|s| format!("symbols[]={}", urlencoding::encode(s)))
+            .map(|s| format!("{}={}", param_name, urlencoding::encode(s)))
             .collect::<Vec<_>>()
             .join("&");
 
-        let path = format!(
-            "/market-data/by-type?{}&instrument-type={}",
-            symbols_query,
-            urlencoding::encode(instrument_type)
-        );
+        let path = format!("/market-data/by-type?{}", symbols_query);
 
         let response: Response = self.inner.get(&path).await?;
         Ok(response.items)

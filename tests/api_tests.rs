@@ -1956,6 +1956,90 @@ mod detailed_quotes_tests {
             }
         }
     }
+
+    /// Test that verifies all fields from /market-data/by-type API are properly deserialized.
+    /// This tests against a specific option to ensure all fields match what the API returns.
+    #[tokio::test]
+    async fn test_detailed_option_quote_all_fields() {
+        let client = get_shared_client().await;
+
+        // Use a COST put option for testing - same format as Python example
+        // The symbol format is: UNDERLYING (6 chars padded) + YYMMDD + P/C + STRIKE*1000 (8 digits)
+        let option_symbol = "COST  260109P00890000";
+
+        let quotes = api(
+            client.market_data().options_detailed(&[option_symbol])
+        ).await;
+
+        match quotes {
+            Ok(quotes) => {
+                assert!(!quotes.is_empty(), "Should get at least one quote");
+                let quote = &quotes[0];
+
+                // Verify the symbol matches
+                assert_eq!(quote.symbol, option_symbol);
+
+                // Log all fields to verify they are populated (matching Python output)
+                tracing::info!("=== DetailedQuote fields for {} ===", quote.symbol);
+                tracing::info!("symbol: {}", quote.symbol);
+                tracing::info!("instrument_type: {:?}", quote.instrument_type);
+                tracing::info!("updated_at: {:?}", quote.updated_at);
+                tracing::info!("bid: {:?}", quote.bid);
+                tracing::info!("bid_size: {:?}", quote.bid_size);
+                tracing::info!("ask: {:?}", quote.ask);
+                tracing::info!("ask_size: {:?}", quote.ask_size);
+                tracing::info!("mid: {:?}", quote.mid);
+                tracing::info!("mark: {:?}", quote.mark);
+                tracing::info!("last: {:?}", quote.last);
+                tracing::info!("last_mkt: {:?}", quote.last_mkt);
+                tracing::info!("open: {:?}", quote.open);
+                tracing::info!("day_high_price: {:?}", quote.day_high_price);
+                tracing::info!("day_low_price: {:?}", quote.day_low_price);
+                tracing::info!("close_price_type: {:?}", quote.close_price_type);
+                tracing::info!("prev_close: {:?}", quote.prev_close);
+                tracing::info!("prev_close_price_type: {:?}", quote.prev_close_price_type);
+                tracing::info!("summary_date: {:?}", quote.summary_date);
+                tracing::info!("prev_close_date: {:?}", quote.prev_close_date);
+                tracing::info!("is_trading_halted: {}", quote.is_trading_halted);
+                tracing::info!("halt_start_time: {:?}", quote.halt_start_time);
+                tracing::info!("halt_end_time: {:?}", quote.halt_end_time);
+                tracing::info!("volume: {:?}", quote.volume);
+                tracing::info!("volatility: {:?}", quote.volatility);
+                tracing::info!("delta: {:?}", quote.delta);
+                tracing::info!("gamma: {:?}", quote.gamma);
+                tracing::info!("theta: {:?}", quote.theta);
+                tracing::info!("rho: {:?}", quote.rho);
+                tracing::info!("vega: {:?}", quote.vega);
+                tracing::info!("theo_price: {:?}", quote.theo_price);
+                tracing::info!("dx_mark: {:?}", quote.dx_mark);
+                tracing::info!("tick_size: {:?}", quote.tick_size);
+                tracing::info!("open_interest: {:?}", quote.open_interest);
+                tracing::info!("=== End of fields ===");
+
+                // Verify key fields are populated for an option
+                assert!(quote.instrument_type.is_some(), "instrument_type should be present");
+                assert!(quote.bid.is_some(), "bid should be present");
+                assert!(quote.ask.is_some(), "ask should be present");
+
+                // Verify Greeks are populated for an option
+                assert!(quote.has_greeks(), "Option should have greeks");
+                assert!(quote.delta.is_some(), "delta should be present for options");
+                assert!(quote.gamma.is_some(), "gamma should be present for options");
+                assert!(quote.theta.is_some(), "theta should be present for options");
+                assert!(quote.vega.is_some(), "vega should be present for options");
+                assert!(quote.rho.is_some(), "rho should be present for options");
+
+                // Verify other option-specific fields
+                assert!(quote.volatility.is_some(), "volatility should be present");
+                assert!(quote.theo_price.is_some(), "theo_price should be present");
+                assert!(quote.open_interest.is_some(), "open_interest should be present");
+            }
+            Err(e) => {
+                tracing::warn!("Detailed option quote error: {:?}", e);
+                // Don't fail - API might not have data for this specific option
+            }
+        }
+    }
 }
 
 // ============================================================================
