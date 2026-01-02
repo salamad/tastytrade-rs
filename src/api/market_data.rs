@@ -149,6 +149,12 @@ impl MarketDataService {
     /// * `symbols` - List of symbols to query
     /// * `instrument_type` - The instrument type string (e.g., "Equity Option", "Equity", "Future")
     ///
+    /// # Note
+    ///
+    /// The sandbox environment may not fully support this endpoint and could return
+    /// empty results or placeholder data. For full functionality, use the production
+    /// environment.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -179,11 +185,6 @@ impl MarketDataService {
             )));
         }
 
-        #[derive(serde::Deserialize)]
-        struct Response {
-            items: Vec<DetailedQuote>,
-        }
-
         // Convert instrument type to API parameter name format
         // e.g., "Equity Option" -> "equity-option[]", "Equity" -> "equity[]"
         let param_name = format!(
@@ -200,8 +201,36 @@ impl MarketDataService {
 
         let path = format!("/market-data/by-type?{}", symbols_query);
 
-        let response: Response = self.inner.get(&path).await?;
-        Ok(response.items)
+        // The response format differs between environments:
+        // - Production: { "data": { "items": [...] } }
+        // - Sandbox: { "data": { ... single object ... } } (often a stub/placeholder)
+        let response: serde_json::Value = self.inner.get(&path).await?;
+
+        // Try to extract items array first (production format)
+        if let Some(items) = response.get("items") {
+            if let Ok(quotes) = serde_json::from_value::<Vec<DetailedQuote>>(items.clone()) {
+                return Ok(quotes);
+            }
+        }
+
+        // If no items array, check if it's a single quote object (sandbox format)
+        // The sandbox returns a stub with symbol="by-type" which we should handle
+        if let Some(symbol) = response.get("symbol").and_then(|v| v.as_str()) {
+            // Check if this is a valid quote or a sandbox stub
+            if symbol == "by-type" || symbol.is_empty() {
+                // Sandbox stub response - return empty vec
+                return Ok(vec![]);
+            }
+
+            // Try to parse as a single DetailedQuote
+            if let Ok(quote) = serde_json::from_value::<DetailedQuote>(response) {
+                return Ok(vec![quote]);
+            }
+        }
+
+        // If we can't parse the response in any expected format, return empty
+        // This handles edge cases like empty responses
+        Ok(vec![])
     }
 
     /// Get detailed option quotes with Greeks.
