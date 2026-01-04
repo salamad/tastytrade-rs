@@ -16,8 +16,9 @@ Cargo.lock
 Thumbs.db
 
 # Environment and secrets
-.env
-.env.local
+.env*
+*.env
+!.env.example
 *.pem
 *.key
 
