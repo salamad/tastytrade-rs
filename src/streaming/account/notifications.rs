@@ -54,8 +54,29 @@ pub enum AccountNotification {
         message: String,
     },
 
-    /// Unknown notification type (raw JSON)
+    /// Unknown notification type (raw JSON).
+    ///
+    /// **Important**: This variant indicates the API sent a notification type
+    /// that this library doesn't recognize. This could indicate:
+    /// - A new API feature not yet supported by this library
+    /// - An API change that requires a library update
+    ///
+    /// Applications should log these events and consider reporting them.
     Unknown(serde_json::Value),
+
+    /// Failed to parse notification data.
+    ///
+    /// This variant is emitted when the notification action is recognized but
+    /// the data payload could not be deserialized. This is a critical error
+    /// that may indicate data loss - applications should handle this carefully.
+    ParseError {
+        /// The notification action type that failed to parse
+        action: String,
+        /// Error message describing what went wrong
+        error: String,
+        /// Raw JSON data that failed to parse
+        raw_data: serde_json::Value,
+    },
 }
 
 impl AccountNotification {
@@ -122,6 +143,74 @@ impl AccountNotification {
     /// Returns `true` if this is a balance-related notification.
     pub fn is_balance(&self) -> bool {
         matches!(self, AccountNotification::Balance(_))
+    }
+
+    /// Returns `true` if this is an unknown notification type.
+    ///
+    /// Unknown notifications should be logged and monitored as they may indicate
+    /// API changes that require a library update.
+    ///
+    /// # Example
+    /// ```
+    /// use tastytrade_rs::streaming::AccountNotification;
+    ///
+    /// let unknown = AccountNotification::Unknown(serde_json::json!({"action": "new-feature"}));
+    /// assert!(unknown.is_unknown());
+    ///
+    /// let heartbeat = AccountNotification::Heartbeat;
+    /// assert!(!heartbeat.is_unknown());
+    /// ```
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, AccountNotification::Unknown(_))
+    }
+
+    /// Returns `true` if this is a parse error notification.
+    ///
+    /// Parse errors indicate that a known notification type could not be deserialized.
+    /// This is a critical condition that may indicate data loss.
+    ///
+    /// # Example
+    /// ```
+    /// use tastytrade_rs::streaming::AccountNotification;
+    ///
+    /// let parse_error = AccountNotification::ParseError {
+    ///     action: "order".to_string(),
+    ///     error: "missing field".to_string(),
+    ///     raw_data: serde_json::json!({}),
+    /// };
+    /// assert!(parse_error.is_parse_error());
+    /// ```
+    pub fn is_parse_error(&self) -> bool {
+        matches!(self, AccountNotification::ParseError { .. })
+    }
+
+    /// Returns `true` if this notification indicates an error condition.
+    ///
+    /// Error conditions include `Disconnected`, `ConnectionWarning`, `Unknown`, and `ParseError`.
+    /// These should be handled specially by applications.
+    ///
+    /// # Example
+    /// ```
+    /// use tastytrade_rs::streaming::AccountNotification;
+    ///
+    /// let parse_error = AccountNotification::ParseError {
+    ///     action: "order".to_string(),
+    ///     error: "missing field".to_string(),
+    ///     raw_data: serde_json::json!({}),
+    /// };
+    /// assert!(parse_error.is_error_condition());
+    ///
+    /// let heartbeat = AccountNotification::Heartbeat;
+    /// assert!(!heartbeat.is_error_condition());
+    /// ```
+    pub fn is_error_condition(&self) -> bool {
+        matches!(
+            self,
+            AccountNotification::Disconnected { .. }
+                | AccountNotification::ConnectionWarning { .. }
+                | AccountNotification::Unknown(_)
+                | AccountNotification::ParseError { .. }
+        )
     }
 }
 
@@ -945,6 +1034,84 @@ mod tests {
             assert_eq!(message, msg);
         } else {
             panic!("Expected ConnectionWarning variant");
+        }
+    }
+
+    // ===== ParseError and Unknown Event Tests =====
+
+    #[test]
+    fn test_parse_error_creation() {
+        let event = AccountNotification::ParseError {
+            action: "order".to_string(),
+            error: "missing required field".to_string(),
+            raw_data: serde_json::json!({"incomplete": "data"}),
+        };
+
+        assert!(event.is_parse_error());
+        assert!(event.is_error_condition());
+        assert!(!event.is_order());
+        assert!(!event.is_healthy());
+    }
+
+    #[test]
+    fn test_parse_error_preserves_data() {
+        let raw = serde_json::json!({"id": 12345, "malformed": true});
+        let event = AccountNotification::ParseError {
+            action: "order".to_string(),
+            error: "unexpected field type".to_string(),
+            raw_data: raw.clone(),
+        };
+
+        if let AccountNotification::ParseError { action, error, raw_data } = event {
+            assert_eq!(action, "order");
+            assert!(error.contains("unexpected"));
+            assert_eq!(raw_data, raw);
+        } else {
+            panic!("Expected ParseError variant");
+        }
+    }
+
+    #[test]
+    fn test_unknown_is_error_condition() {
+        let event = AccountNotification::Unknown(serde_json::json!({"action": "new-api-feature"}));
+        assert!(event.is_unknown());
+        assert!(event.is_error_condition());
+        assert!(!event.is_healthy());
+    }
+
+    #[test]
+    fn test_is_error_condition_comprehensive() {
+        // Error conditions
+        assert!(AccountNotification::Disconnected { reason: "test".to_string() }.is_error_condition());
+        assert!(AccountNotification::ConnectionWarning { message: "test".to_string() }.is_error_condition());
+        assert!(AccountNotification::Unknown(serde_json::json!({})).is_error_condition());
+        assert!(AccountNotification::ParseError {
+            action: "order".to_string(),
+            error: "test".to_string(),
+            raw_data: serde_json::json!({}),
+        }.is_error_condition());
+
+        // Non-error conditions
+        assert!(!AccountNotification::Heartbeat.is_error_condition());
+        assert!(!AccountNotification::Order(OrderNotification::default()).is_error_condition());
+        assert!(!AccountNotification::Position(PositionNotification::default()).is_error_condition());
+        assert!(!AccountNotification::Balance(BalanceNotification::default()).is_error_condition());
+        assert!(!AccountNotification::Reconnected { accounts_restored: 1 }.is_error_condition());
+    }
+
+    #[test]
+    fn test_parse_error_for_all_action_types() {
+        // Test that parse errors can be created for all notification types
+        for action in &["order", "position", "balance", "quote-alert"] {
+            let event = AccountNotification::ParseError {
+                action: action.to_string(),
+                error: "test error".to_string(),
+                raw_data: serde_json::json!({}),
+            };
+            assert!(event.is_parse_error());
+            if let AccountNotification::ParseError { action: a, .. } = event {
+                assert_eq!(&a, action);
+            }
         }
     }
 }

@@ -107,6 +107,11 @@ pub struct AccountStreamer {
     auth_token: Arc<RwLock<String>>,
     // Request ID counter for message tracking
     request_id: Arc<AtomicU64>,
+
+    // Auto-reconnection state
+    reconnect_attempts: u32,
+    // Flag to track if we're in the middle of an auto-reconnect attempt
+    auto_reconnecting: bool,
 }
 
 /// Account notification action type.
@@ -182,6 +187,8 @@ impl AccountStreamer {
             reconnect_config: ReconnectConfig::default(),
             auth_token,
             request_id,
+            reconnect_attempts: 0,
+            auto_reconnecting: false,
         })
     }
 
@@ -372,8 +379,157 @@ impl AccountStreamer {
         Ok(())
     }
 
-    /// Get the next notification.
+    /// Get the next notification with automatic reconnection support.
+    ///
+    /// If `reconnect_config.enabled` is `true` (the default), this method will
+    /// automatically attempt to reconnect when the connection drops. It will:
+    ///
+    /// 1. Emit a `Disconnected` notification when connection is lost
+    /// 2. Wait according to exponential backoff strategy
+    /// 3. Attempt to reconnect and restore subscriptions
+    /// 4. Emit a `Reconnected` notification on success
+    /// 5. Continue delivering notifications
+    ///
+    /// If reconnection fails after `max_attempts`, returns `None` to indicate
+    /// the stream has ended.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// while let Some(result) = streamer.next().await {
+    ///     match result? {
+    ///         AccountNotification::Order(order) => {
+    ///             println!("Order update: {:?}", order);
+    ///         }
+    ///         AccountNotification::Disconnected { reason } => {
+    ///             // Auto-reconnect will be attempted if enabled
+    ///             println!("Connection lost: {}, reconnecting...", reason);
+    ///         }
+    ///         AccountNotification::Reconnected { accounts_restored } => {
+    ///             println!("Reconnected with {} accounts", accounts_restored);
+    ///         }
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
     pub async fn next(&mut self) -> Option<Result<AccountNotification>> {
+        loop {
+            // If we're in the middle of auto-reconnecting, attempt reconnection
+            if self.auto_reconnecting {
+                // Check if max attempts exceeded
+                if self.reconnect_config.max_attempts_exceeded(self.reconnect_attempts) {
+                    tracing::error!(
+                        attempts = self.reconnect_attempts,
+                        max_attempts = self.reconnect_config.max_attempts,
+                        "Auto-reconnection failed: maximum attempts exceeded"
+                    );
+                    self.auto_reconnecting = false;
+                    return None; // Stream has ended
+                }
+
+                // Calculate backoff delay
+                let backoff = self.reconnect_config.backoff_for_attempt(self.reconnect_attempts);
+                tracing::info!(
+                    attempt = self.reconnect_attempts + 1,
+                    backoff_ms = backoff.as_millis() as u64,
+                    "Attempting auto-reconnection"
+                );
+
+                // Wait for backoff period
+                tokio::time::sleep(backoff).await;
+
+                // Attempt reconnection
+                match self.reconnect().await {
+                    Ok(()) => {
+                        // Reconnection successful
+                        let accounts_restored = self.subscription_count().await;
+                        self.reconnect_attempts = 0;
+                        self.auto_reconnecting = false;
+
+                        tracing::info!(
+                            accounts_restored = accounts_restored,
+                            "Auto-reconnection successful"
+                        );
+
+                        return Some(Ok(AccountNotification::Reconnected { accounts_restored }));
+                    }
+                    Err(e) => {
+                        // Reconnection failed, increment attempt counter
+                        self.reconnect_attempts += 1;
+                        tracing::warn!(
+                            attempt = self.reconnect_attempts,
+                            error = %e,
+                            "Auto-reconnection attempt failed"
+                        );
+                        // Loop continues to try again
+                        continue;
+                    }
+                }
+            }
+
+            // Normal notification receiving
+            match self.notification_rx.recv().await {
+                Some(Ok(AccountNotification::Disconnected { reason })) => {
+                    // Connection was lost
+                    if self.reconnect_config.enabled {
+                        // Start auto-reconnection on next call
+                        self.auto_reconnecting = true;
+                        tracing::warn!(
+                            reason = %reason,
+                            "Connection lost, auto-reconnection enabled"
+                        );
+                    }
+                    // Always emit the Disconnected event first
+                    return Some(Ok(AccountNotification::Disconnected { reason }));
+                }
+                Some(Ok(notification)) => {
+                    // Reset reconnect attempts on successful message
+                    self.reconnect_attempts = 0;
+                    return Some(Ok(notification));
+                }
+                Some(Err(e)) => {
+                    return Some(Err(e));
+                }
+                None => {
+                    // Channel closed - connection ended
+                    if self.reconnect_config.enabled && !self.auto_reconnecting {
+                        // Unexpected channel close, trigger auto-reconnect
+                        self.auto_reconnecting = true;
+                        tracing::warn!("Notification channel closed unexpectedly, triggering auto-reconnect");
+                        return Some(Ok(AccountNotification::Disconnected {
+                            reason: "Channel closed unexpectedly".to_string(),
+                        }));
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Get the next notification without automatic reconnection.
+    ///
+    /// Use this method if you want full control over reconnection behavior.
+    /// Returns `None` when the connection ends.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// loop {
+    ///     match streamer.next_raw().await {
+    ///         Some(Ok(notification)) => {
+    ///             // Handle notification
+    ///         }
+    ///         Some(Err(e)) => {
+    ///             eprintln!("Error: {}", e);
+    ///         }
+    ///         None => {
+    ///             // Connection ended, manually handle reconnection
+    ///             streamer.reconnect().await?;
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    pub async fn next_raw(&mut self) -> Option<Result<AccountNotification>> {
         self.notification_rx.recv().await
     }
 
@@ -647,30 +803,87 @@ impl AccountStreamer {
             }
             "order" => {
                 let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                Ok(AccountNotification::Order(
-                    serde_json::from_value(data).unwrap_or_default()
-                ))
+                match serde_json::from_value::<OrderNotification>(data.clone()) {
+                    Ok(order) => Ok(AccountNotification::Order(order)),
+                    Err(e) => {
+                        tracing::error!(
+                            action = "order",
+                            error = %e,
+                            raw_data = %data,
+                            "Failed to deserialize order notification - potential data loss"
+                        );
+                        Ok(AccountNotification::ParseError {
+                            action: "order".to_string(),
+                            error: e.to_string(),
+                            raw_data: data,
+                        })
+                    }
+                }
             }
             "position" => {
                 let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                Ok(AccountNotification::Position(
-                    serde_json::from_value(data).unwrap_or_default()
-                ))
+                match serde_json::from_value::<PositionNotification>(data.clone()) {
+                    Ok(position) => Ok(AccountNotification::Position(position)),
+                    Err(e) => {
+                        tracing::error!(
+                            action = "position",
+                            error = %e,
+                            raw_data = %data,
+                            "Failed to deserialize position notification - potential data loss"
+                        );
+                        Ok(AccountNotification::ParseError {
+                            action: "position".to_string(),
+                            error: e.to_string(),
+                            raw_data: data,
+                        })
+                    }
+                }
             }
             "balance" => {
                 let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                Ok(AccountNotification::Balance(
-                    serde_json::from_value(data).unwrap_or_default()
-                ))
+                match serde_json::from_value::<BalanceNotification>(data.clone()) {
+                    Ok(balance) => Ok(AccountNotification::Balance(balance)),
+                    Err(e) => {
+                        tracing::error!(
+                            action = "balance",
+                            error = %e,
+                            raw_data = %data,
+                            "Failed to deserialize balance notification - potential data loss"
+                        );
+                        Ok(AccountNotification::ParseError {
+                            action: "balance".to_string(),
+                            error: e.to_string(),
+                            raw_data: data,
+                        })
+                    }
+                }
             }
             "quote-alert" => {
                 let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
-                Ok(AccountNotification::QuoteAlert(
-                    serde_json::from_value(data).unwrap_or_default()
-                ))
+                match serde_json::from_value::<QuoteAlertNotification>(data.clone()) {
+                    Ok(alert) => Ok(AccountNotification::QuoteAlert(alert)),
+                    Err(e) => {
+                        tracing::error!(
+                            action = "quote-alert",
+                            error = %e,
+                            raw_data = %data,
+                            "Failed to deserialize quote alert notification - potential data loss"
+                        );
+                        Ok(AccountNotification::ParseError {
+                            action: "quote-alert".to_string(),
+                            error: e.to_string(),
+                            raw_data: data,
+                        })
+                    }
+                }
             }
             _ => {
-                // Return raw notification for unknown types
+                // Log unknown notification types for monitoring
+                tracing::warn!(
+                    action = action,
+                    raw_json = %json,
+                    "Received unknown notification type - consider updating the library"
+                );
                 Ok(AccountNotification::Unknown(json))
             }
         }

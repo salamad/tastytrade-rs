@@ -11,13 +11,13 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 - **Full API Coverage**: Accounts, orders, positions, balances, transactions, instruments, market data, watchlists
 - **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for order/position/balance notifications
 - **DXLink Enhancements**: COMPACT protocol format, multi-channel architecture, proper handshake verification, proactive keepalive, reconnection support, configurable settings, typed event filtering
-- **Account Streamer Enhancements**: Auto-reconnection with configurable backoff, connection state tracking, subscription inspection, typed order status helpers
+- **Account Streamer Enhancements**: Auto-reconnection with configurable backoff (enabled by default), connection state tracking, subscription inspection, typed order status helpers, parse error propagation, unknown event monitoring
 - **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
 - **Async-first**: Built on Tokio for high-performance async I/O
 - **Authentication**: OAuth2 and legacy session-based authentication with automatic token refresh
-- **Order Builder**: Fluent API with compile-time validation for order construction
-- **Production Ready**: Comprehensive error handling, retry logic, and connection management
+- **Order Builder**: Fluent API with comprehensive client-side validation (quantity, price, symbol validation)
+- **Production Ready**: Comprehensive error handling, retry logic, connection management, and structured logging via `tracing`
 
 ## Installation
 
@@ -141,6 +141,63 @@ async fn main() -> tastytrade_rs::Result<()> {
     Ok(())
 }
 ```
+
+#### Order Validation
+
+The order builder performs comprehensive client-side validation before sending to the API:
+
+```rust
+use tastytrade_rs::models::{NewOrderBuilder, OrderType, TimeInForce, OrderLeg};
+use rust_decimal_macros::dec;
+
+// These will all return clear error messages:
+
+// Error: "Leg 1 has invalid quantity 0: quantity must be positive"
+let result = NewOrderBuilder::new()
+    .time_in_force(TimeInForce::Day)
+    .order_type(OrderType::Market)
+    .add_leg(OrderLeg::buy_equity("AAPL", dec!(0)))
+    .build();
+
+// Error: "Leg 1 has invalid quantity -10: quantity must be positive"
+let result = NewOrderBuilder::new()
+    .time_in_force(TimeInForce::Day)
+    .order_type(OrderType::Market)
+    .add_leg(OrderLeg::buy_equity("AAPL", dec!(-10)))
+    .build();
+
+// Error: "Leg 1 has empty symbol: symbol is required"
+let result = NewOrderBuilder::new()
+    .time_in_force(TimeInForce::Day)
+    .order_type(OrderType::Market)
+    .add_leg(OrderLeg::buy_equity("", dec!(10)))
+    .build();
+
+// Error: "Limit price -150 is negative: price must be non-negative"
+let result = NewOrderBuilder::new()
+    .time_in_force(TimeInForce::Day)
+    .order_type(OrderType::Limit)
+    .price(dec!(-150.00))
+    .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+    .build();
+
+// Error: "Stop trigger 0 is invalid: stop trigger must be positive"
+let result = NewOrderBuilder::new()
+    .time_in_force(TimeInForce::Day)
+    .order_type(OrderType::Stop)
+    .stop_trigger(dec!(0))
+    .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+    .build();
+```
+
+**Validation rules:**
+- All leg quantities must be positive (non-zero, non-negative)
+- All leg symbols must be non-empty
+- Limit orders require a non-negative price
+- Stop orders require a positive stop trigger
+- GTD orders require a gtc_date
+- Cannot specify both price and value
+- Value (if specified) must be positive
 
 ### Option Spread Order
 
@@ -523,6 +580,73 @@ notification.is_position();         // Is this a position update?
 notification.is_balance();          // Is this a balance update?
 notification.is_connection_event(); // Disconnected, Reconnected, or Warning?
 notification.is_healthy();          // Heartbeat or SubscriptionConfirmation?
+notification.is_error_condition();  // Disconnected, Warning, Unknown, or ParseError?
+notification.is_parse_error();      // Failed to deserialize notification data?
+notification.is_unknown();          // Unrecognized notification type from API?
+```
+
+#### Error Handling and Parse Errors
+
+The account streamer provides robust error handling for notification parsing. Instead of silently dropping malformed data, parse errors are propagated as `ParseError` notifications:
+
+```rust
+while let Some(notification) = streamer.next().await {
+    match notification? {
+        AccountNotification::ParseError { action, error, raw_data } => {
+            // Critical: notification data could not be deserialized
+            // This may indicate data loss - log and alert!
+            tracing::error!(
+                action = %action,
+                error = %error,
+                raw_data = %raw_data,
+                "Failed to parse notification - potential data loss"
+            );
+        }
+        AccountNotification::Unknown(json) => {
+            // The API sent a notification type this library doesn't recognize
+            // This may indicate an API update - consider upgrading the library
+            tracing::warn!(
+                raw_json = %json,
+                "Unknown notification type received"
+            );
+        }
+        // ... handle other notifications
+        _ => {}
+    }
+}
+```
+
+#### Automatic Reconnection Behavior
+
+The `next()` method handles automatic reconnection by default:
+
+```rust
+// Auto-reconnection is ENABLED by default
+let mut streamer = client.streaming().account().await?;
+
+// The next() method will:
+// 1. Emit Disconnected when connection drops
+// 2. Automatically attempt reconnection with exponential backoff
+// 3. Emit Reconnected when successful (subscriptions are restored)
+// 4. Return None only after max_attempts exceeded
+
+while let Some(notification) = streamer.next().await {
+    match notification? {
+        AccountNotification::Disconnected { reason } => {
+            println!("Lost connection: {} - auto-reconnecting...", reason);
+        }
+        AccountNotification::Reconnected { accounts_restored } => {
+            println!("Reconnected! {} accounts restored", accounts_restored);
+        }
+        // ... handle other notifications
+        _ => {}
+    }
+}
+
+// For manual reconnection control, use next_raw():
+while let Some(notification) = streamer.next_raw().await {
+    // Handle reconnection yourself
+}
 ```
 
 ### Get Option Chain

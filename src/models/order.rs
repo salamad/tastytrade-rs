@@ -277,7 +277,29 @@ impl NewOrderBuilder {
     }
 
     /// Build the order, validating all fields.
+    ///
+    /// # Validation Rules
+    ///
+    /// This method performs comprehensive client-side validation to catch common
+    /// errors before sending to the API:
+    ///
+    /// - `time_in_force` is required
+    /// - `order_type` is required
+    /// - At least one leg is required
+    /// - Limit orders require a positive price
+    /// - Stop orders require a positive stop_trigger price
+    /// - GTD orders require a gtc_date
+    /// - Cannot specify both price and value
+    /// - All leg quantities must be positive (non-zero, non-negative)
+    /// - All leg symbols must be non-empty
+    /// - Value (if specified) must be positive
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidInput` if any validation fails.
     pub fn build(self) -> crate::Result<NewOrder> {
+        use rust_decimal::Decimal;
+
         let time_in_force = self.time_in_force.ok_or_else(|| {
             crate::Error::InvalidInput("time_in_force is required".to_string())
         })?;
@@ -292,22 +314,80 @@ impl NewOrderBuilder {
             ));
         }
 
+        // Validate each leg
+        for (i, leg) in self.legs.iter().enumerate() {
+            // Check for zero or negative quantities
+            if leg.quantity <= Decimal::ZERO {
+                return Err(crate::Error::InvalidInput(format!(
+                    "Leg {} has invalid quantity {}: quantity must be positive",
+                    i + 1,
+                    leg.quantity
+                )));
+            }
+
+            // Check for empty symbols
+            if leg.symbol.trim().is_empty() {
+                return Err(crate::Error::InvalidInput(format!(
+                    "Leg {} has empty symbol: symbol is required",
+                    i + 1
+                )));
+            }
+        }
+
         // Validate price for limit orders
-        if matches!(order_type, OrderType::Limit | OrderType::MarketableLimit | OrderType::StopLimit)
-            && self.price.is_none()
-        {
-            return Err(crate::Error::InvalidInput(
-                "Limit orders require a price".to_string(),
-            ));
+        if matches!(order_type, OrderType::Limit | OrderType::MarketableLimit | OrderType::StopLimit) {
+            match self.price {
+                None => {
+                    return Err(crate::Error::InvalidInput(
+                        "Limit orders require a price".to_string(),
+                    ));
+                }
+                Some(price) if price < Decimal::ZERO => {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "Limit price {} is negative: price must be non-negative",
+                        price
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        // Validate non-negative price even for non-limit orders (if specified)
+        if let Some(price) = self.price {
+            if price < Decimal::ZERO {
+                return Err(crate::Error::InvalidInput(format!(
+                    "Price {} is negative: price must be non-negative",
+                    price
+                )));
+            }
         }
 
         // Validate stop trigger for stop orders
-        if matches!(order_type, OrderType::Stop | OrderType::StopLimit)
-            && self.stop_trigger.is_none()
-        {
-            return Err(crate::Error::InvalidInput(
-                "Stop orders require a stop_trigger price".to_string(),
-            ));
+        if matches!(order_type, OrderType::Stop | OrderType::StopLimit) {
+            match self.stop_trigger {
+                None => {
+                    return Err(crate::Error::InvalidInput(
+                        "Stop orders require a stop_trigger price".to_string(),
+                    ));
+                }
+                Some(trigger) if trigger <= Decimal::ZERO => {
+                    return Err(crate::Error::InvalidInput(format!(
+                        "Stop trigger {} is invalid: stop trigger must be positive",
+                        trigger
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        // Validate non-negative stop trigger even for non-stop orders (if specified)
+        if let Some(trigger) = self.stop_trigger {
+            if trigger <= Decimal::ZERO {
+                return Err(crate::Error::InvalidInput(format!(
+                    "Stop trigger {} is invalid: stop trigger must be positive",
+                    trigger
+                )));
+            }
         }
 
         // Validate GTC date for GTD orders
@@ -322,6 +402,16 @@ impl NewOrderBuilder {
             return Err(crate::Error::InvalidInput(
                 "Cannot specify both price and value".to_string(),
             ));
+        }
+
+        // Validate value if specified
+        if let Some(value) = self.value {
+            if value <= Decimal::ZERO {
+                return Err(crate::Error::InvalidInput(format!(
+                    "Order value {} is invalid: value must be positive",
+                    value
+                )));
+            }
         }
 
         Ok(NewOrder {
@@ -720,5 +810,188 @@ mod tests {
         let sell = OrderLeg::sell_to_close_option("AAPL  240119C00150000", dec!(5));
         assert_eq!(sell.instrument_type, InstrumentType::EquityOption);
         assert_eq!(sell.action, OrderAction::SellToClose);
+    }
+
+    // ===== Robust Validation Tests =====
+
+    #[test]
+    fn test_order_builder_zero_quantity_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Market)
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(0)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("quantity must be positive"));
+    }
+
+    #[test]
+    fn test_order_builder_negative_quantity_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Market)
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(-10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("quantity must be positive"));
+    }
+
+    #[test]
+    fn test_order_builder_empty_symbol_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Market)
+            .add_leg(OrderLeg::buy_equity("", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("empty symbol"));
+    }
+
+    #[test]
+    fn test_order_builder_whitespace_symbol_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Market)
+            .add_leg(OrderLeg::buy_equity("   ", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("empty symbol"));
+    }
+
+    #[test]
+    fn test_order_builder_negative_price_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Limit)
+            .price(dec!(-150.00))
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("negative"));
+    }
+
+    #[test]
+    fn test_order_builder_zero_price_allowed_for_limit() {
+        // Zero price is allowed (free stock promotions, etc.)
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Limit)
+            .price(dec!(0))
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .build();
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_order_builder_zero_stop_trigger_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Stop)
+            .stop_trigger(dec!(0))
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("stop trigger must be positive"));
+    }
+
+    #[test]
+    fn test_order_builder_negative_stop_trigger_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Stop)
+            .stop_trigger(dec!(-100.00))
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("stop trigger must be positive"));
+    }
+
+    #[test]
+    fn test_order_builder_negative_value_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::NotionalMarket)
+            .value(dec!(-1000.00))
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("value must be positive"));
+    }
+
+    #[test]
+    fn test_order_builder_zero_value_rejected() {
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::NotionalMarket)
+            .value(dec!(0))
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("value must be positive"));
+    }
+
+    #[test]
+    fn test_order_builder_multi_leg_validation() {
+        // First leg is valid, second leg has zero quantity
+        let result = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Market)
+            .add_leg(OrderLeg::buy_equity("AAPL", dec!(10)))
+            .add_leg(OrderLeg::sell_equity("MSFT", dec!(0)))
+            .build();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Should identify which leg has the error
+        assert!(err.to_string().contains("Leg 2"));
+    }
+
+    #[test]
+    fn test_order_builder_valid_stop_order() {
+        let order = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::Stop)
+            .stop_trigger(dec!(145.00))
+            .add_leg(OrderLeg::sell_equity("AAPL", dec!(10)))
+            .build()
+            .unwrap();
+
+        assert_eq!(order.order_type, OrderType::Stop);
+        assert_eq!(order.stop_trigger, Some(dec!(145.00)));
+    }
+
+    #[test]
+    fn test_order_builder_valid_stop_limit_order() {
+        let order = NewOrderBuilder::new()
+            .time_in_force(TimeInForce::Day)
+            .order_type(OrderType::StopLimit)
+            .price(dec!(144.00))
+            .stop_trigger(dec!(145.00))
+            .add_leg(OrderLeg::sell_equity("AAPL", dec!(10)))
+            .build()
+            .unwrap();
+
+        assert_eq!(order.order_type, OrderType::StopLimit);
+        assert_eq!(order.price, Some(dec!(144.00)));
+        assert_eq!(order.stop_trigger, Some(dec!(145.00)));
     }
 }
