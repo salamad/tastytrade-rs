@@ -9,7 +9,8 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 ## Features
 
 - **Full API Coverage**: Accounts, orders, positions, balances, transactions, instruments, market data, watchlists
-- **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for notifications
+- **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for order/position/balance notifications
+- **Account Streamer Enhancements**: Auto-reconnection with configurable backoff, connection state tracking, subscription inspection, typed order status helpers
 - **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
 - **Async-first**: Built on Tokio for high-performance async I/O
@@ -296,6 +297,96 @@ async fn main() -> tastytrade_rs::Result<()> {
 
     Ok(())
 }
+```
+
+#### Reconnection Configuration
+
+The account streamer supports configurable automatic reconnection:
+
+```rust
+use tastytrade_rs::streaming::ReconnectConfig;
+use std::time::Duration;
+
+// Preset configurations
+let default = ReconnectConfig::default();        // 10 attempts, 1-60s backoff
+let aggressive = ReconnectConfig::aggressive();  // Unlimited attempts, 0.5-30s backoff
+let conservative = ReconnectConfig::conservative(); // 5 attempts, 2-120s backoff
+let disabled = ReconnectConfig::disabled();      // No auto-reconnect
+
+// Custom configuration
+let custom = ReconnectConfig::new(
+    true,                           // enabled
+    20,                             // max_attempts (0 = unlimited)
+    Duration::from_millis(500),     // initial_backoff
+    Duration::from_secs(30),        // max_backoff
+    1.5,                            // backoff_multiplier
+);
+
+// Apply to streamer
+let streamer = client.streaming().account().await?
+    .with_reconnect_config(aggressive);
+```
+
+#### Connection State & Subscription Inspection
+
+```rust
+// Check connection state
+if streamer.is_connected() {
+    println!("WebSocket connection is active");
+}
+
+// Inspect subscriptions
+let accounts = streamer.subscribed_accounts().await;
+println!("Subscribed to {} accounts: {:?}", accounts.len(), accounts);
+
+// Check specific subscription
+if streamer.is_subscribed(&account).await {
+    println!("Subscribed to {}", account);
+}
+
+// Manual reconnection
+if !streamer.is_connected() {
+    streamer.reconnect().await?;
+}
+```
+
+#### Order Notification Helpers
+
+The `OrderNotification` type provides convenient helper methods:
+
+```rust
+if let AccountNotification::Order(order) = notification? {
+    // Order ID access
+    let id = order.order_id();           // Option<String>
+    let id_num = order.order_id_numeric(); // Option<i64>
+
+    // Match specific order
+    if order.matches_order(12345) {
+        println!("This is order 12345");
+    }
+
+    // Status checks (typed OrderStatus enum)
+    order.is_filled();      // Filled
+    order.is_rejected();    // Rejected
+    order.is_cancelled();   // Cancelled
+    order.is_expired();     // Expired
+    order.is_live();        // Live (working on exchange)
+
+    // State categories
+    order.is_terminal();    // Filled, Rejected, Cancelled, or Expired
+    order.is_working();     // Received, Routed, InFlight, or Live
+}
+```
+
+#### Notification Type Helpers
+
+```rust
+// Check notification categories
+notification.is_order();            // Is this an order update?
+notification.is_position();         // Is this a position update?
+notification.is_balance();          // Is this a balance update?
+notification.is_connection_event(); // Disconnected, Reconnected, or Warning?
+notification.is_healthy();          // Heartbeat or SubscriptionConfirmation?
 ```
 
 ### Get Option Chain
