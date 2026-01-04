@@ -68,8 +68,8 @@ pub enum Error {
     },
 
     /// Request timed out
-    #[error("Request timeout")]
-    Timeout,
+    #[error("Request timeout: {0}")]
+    Timeout(String),
 
     /// Stream was disconnected unexpectedly
     #[error("Stream disconnected")]
@@ -114,7 +114,7 @@ impl Error {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Error::Http(_) | Error::Timeout | Error::RateLimited { .. } | Error::WebSocket(_)
+            Error::Http(_) | Error::Timeout(_) | Error::RateLimited { .. } | Error::WebSocket(_)
         )
     }
 
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_error_retryable() {
-        assert!(Error::Timeout.is_retryable());
+        assert!(Error::Timeout("test".into()).is_retryable());
         assert!(Error::RateLimited { retry_after_secs: 30 }.is_retryable());
         assert!(!Error::InvalidInput("bad".into()).is_retryable());
     }
@@ -187,7 +187,7 @@ mod tests {
     fn test_error_auth() {
         assert!(Error::SessionExpired.is_auth_error());
         assert!(Error::Authentication("failed".into()).is_auth_error());
-        assert!(!Error::Timeout.is_auth_error());
+        assert!(!Error::Timeout("test".into()).is_auth_error());
     }
 
     #[test]

@@ -10,6 +10,7 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 
 - **Full API Coverage**: Accounts, orders, positions, balances, transactions, instruments, market data, watchlists
 - **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for order/position/balance notifications
+- **DXLink Enhancements**: COMPACT protocol format, proper handshake verification (AUTH_STATE, CHANNEL_OPENED), proactive keepalive, reconnection support, connection state tracking
 - **Account Streamer Enhancements**: Auto-reconnection with configurable backoff, connection state tracking, subscription inspection, typed order status helpers
 - **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
@@ -181,39 +182,60 @@ async fn main() -> tastytrade_rs::Result<()> {
 
 ### Real-time Market Data Streaming
 
+The DXLink streamer provides real-time market data via the dxFeed streaming protocol with COMPACT format for efficient bandwidth usage.
+
 ```rust
 use tastytrade_rs::{TastytradeClient, Environment};
-use tastytrade_rs::streaming::{Quote, Trade, DxEvent};
+use tastytrade_rs::streaming::{Quote, Trade, Greeks, DxEvent, ReconnectConfig};
 
 #[tokio::main]
 async fn main() -> tastytrade_rs::Result<()> {
     let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
 
-    // Create DXLink streamer for market data
-    let mut streamer = client.streaming().dxlink().await?;
+    // Create DXLink streamer with aggressive reconnection for 24/7 operation
+    let mut streamer = client.streaming().dxlink().await?
+        .with_reconnect_config(ReconnectConfig::aggressive());
 
     // Subscribe to quotes for multiple symbols
     streamer.subscribe::<Quote>(&["AAPL", "SPY", "QQQ"]).await?;
 
-    // Also subscribe to trades
+    // Also subscribe to trades and greeks
     streamer.subscribe::<Trade>(&["AAPL"]).await?;
+    streamer.subscribe::<Greeks>(&["AAPL  250117C00200000"]).await?;
+
+    // Check connection state
+    println!("Connected: {}", streamer.is_connected());
+    println!("Subscriptions: {:?}", streamer.subscribed_symbols().await);
 
     // Process incoming events
     while let Some(event) = streamer.next().await {
-        match event? {
-            DxEvent::Quote(quote) => {
+        match event {
+            Ok(DxEvent::Quote(quote)) => {
                 println!("[QUOTE] {}: bid={:?} x {:?}, ask={:?} x {:?}",
                     quote.event_symbol,
                     quote.bid_price, quote.bid_size,
                     quote.ask_price, quote.ask_size
                 );
             }
-            DxEvent::Trade(trade) => {
+            Ok(DxEvent::Trade(trade)) => {
                 println!("[TRADE] {}: {} @ {:?}",
                     trade.event_symbol,
                     trade.size.unwrap_or_default(),
                     trade.price
                 );
+            }
+            Ok(DxEvent::Greeks(greeks)) => {
+                println!("[GREEKS] {}: delta={:?}, gamma={:?}, theta={:?}",
+                    greeks.event_symbol,
+                    greeks.delta, greeks.gamma, greeks.theta
+                );
+            }
+            Err(e) => {
+                println!("Stream error: {}", e);
+                // Attempt manual reconnection if disconnected
+                if !streamer.is_connected() {
+                    streamer.reconnect().await?;
+                }
             }
             _ => {}
         }
@@ -222,6 +244,46 @@ async fn main() -> tastytrade_rs::Result<()> {
     Ok(())
 }
 ```
+
+#### DXLink Connection Management
+
+```rust
+use tastytrade_rs::streaming::ReconnectConfig;
+
+// Create streamer with reconnection config
+let mut streamer = client.streaming().dxlink().await?
+    .with_reconnect_config(ReconnectConfig::aggressive());
+
+// Check connection state
+if streamer.is_connected() {
+    println!("WebSocket connection is active");
+}
+
+// Inspect subscriptions
+let subs = streamer.subscribed_symbols().await;
+println!("Subscribed to {} symbols", subs.len());
+
+// Get subscription count
+let count = streamer.subscription_count().await;
+
+// Manual reconnection (automatically re-subscribes to all symbols)
+if !streamer.is_connected() {
+    streamer.reconnect().await?;
+    println!("Reconnected and re-subscribed to all symbols");
+}
+```
+
+#### Available Event Types
+
+| Event | Description |
+|-------|-------------|
+| `Quote` | Bid/ask quotes with sizes |
+| `Trade` | Trade executions with price, size, volume |
+| `Greeks` | Option greeks (delta, gamma, theta, vega, rho) |
+| `Summary` | Daily OHLC and open interest |
+| `Profile` | Security profile and trading status |
+| `Candle` | Candlestick data |
+| `TheoPrice` | Theoretical option pricing |
 
 ### Account Activity Streaming
 
