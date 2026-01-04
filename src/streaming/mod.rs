@@ -51,7 +51,7 @@ pub mod dxlink;
 pub mod account;
 
 pub use dxlink::{DxLinkStreamer, DxEvent, DxEventTrait, EventType, Quote, Trade, Greeks, Summary, Profile, Candle, TheoPrice};
-pub use account::{AccountStreamer, AccountNotification, OrderNotification, PositionNotification, BalanceNotification, QuoteAlertNotification};
+pub use account::{AccountStreamer, AccountNotification, OrderNotification, PositionNotification, BalanceNotification, QuoteAlertNotification, ReconnectConfig};
 
 use std::sync::Arc;
 use crate::client::ClientInner;

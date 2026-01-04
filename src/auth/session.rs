@@ -224,12 +224,28 @@ impl Session {
         Err(Error::SessionExpired)
     }
 
-    /// Get the current access token.
+    /// Get the current access token as a SecretString.
     ///
     /// This method does not check if the token is expired. Use
     /// `ensure_valid()` to refresh if needed first.
     pub(crate) async fn access_token(&self) -> SecretString {
         self.inner.read().await.access_token.clone()
+    }
+
+    /// Get the current session token as a String.
+    ///
+    /// This is used for WebSocket authentication where the token
+    /// must be included in message payloads.
+    ///
+    /// This method does not check if the token is expired. Use
+    /// `ensure_valid()` to refresh if needed first.
+    pub async fn session_token(&self) -> String {
+        self.inner
+            .read()
+            .await
+            .access_token
+            .expose_secret()
+            .to_string()
     }
 
     /// Ensure the session is valid, refreshing if necessary.

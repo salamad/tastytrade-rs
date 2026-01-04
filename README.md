@@ -224,30 +224,52 @@ async fn main() -> tastytrade_rs::Result<()> {
 
 ### Account Activity Streaming
 
+The account streamer provides real-time notifications for order fills, position changes, and balance updates - essential for trading bots.
+
 ```rust
 use tastytrade_rs::{TastytradeClient, Environment, AccountNumber};
-use tastytrade_rs::streaming::AccountNotification;
+use tastytrade_rs::streaming::{AccountNotification, ReconnectConfig};
+use tastytrade_rs::models::OrderStatus;
 
 #[tokio::main]
 async fn main() -> tastytrade_rs::Result<()> {
     let client = TastytradeClient::login("user", "pass", Environment::Sandbox).await?;
     let account = AccountNumber::new("5WV12345");
 
-    // Create account streamer
-    let mut streamer = client.streaming().account().await?;
+    // Create account streamer with aggressive reconnection for 24/7 operation
+    let mut streamer = client.streaming().account().await?
+        .with_reconnect_config(ReconnectConfig::aggressive());
 
     // Subscribe to account updates
     streamer.subscribe(&account).await?;
+
+    // Check connection state
+    println!("Connected: {}", streamer.is_connected());
+    println!("Subscribed accounts: {:?}", streamer.subscribed_accounts().await);
 
     // Process notifications
     while let Some(notification) = streamer.next().await {
         match notification? {
             AccountNotification::Order(order) => {
-                println!("[ORDER] {:?}: {} {:?}",
-                    order.id,
-                    order.status.unwrap_or_default(),
-                    order.underlying_symbol
-                );
+                // Use typed OrderStatus for pattern matching
+                if order.is_filled() {
+                    println!("Order {} FILLED at {:?}!",
+                        order.order_id().unwrap_or_default(),
+                        order.average_fill_price
+                    );
+                } else if order.is_rejected() {
+                    println!("Order {} REJECTED", order.order_id().unwrap_or_default());
+                } else if order.is_working() {
+                    println!("Order {} is working ({:?})",
+                        order.order_id().unwrap_or_default(),
+                        order.status
+                    );
+                }
+
+                // Check terminal state
+                if order.is_terminal() {
+                    println!("Order complete (terminal state)");
+                }
             }
             AccountNotification::Position(pos) => {
                 println!("[POSITION] {}: {:?} shares",
@@ -257,6 +279,13 @@ async fn main() -> tastytrade_rs::Result<()> {
             }
             AccountNotification::Balance(bal) => {
                 println!("[BALANCE] Net Liq: {:?}", bal.net_liquidating_value);
+            }
+            AccountNotification::Disconnected { reason } => {
+                println!("Connection lost: {}", reason);
+                // Auto-reconnect will handle this if configured
+            }
+            AccountNotification::Reconnected { accounts_restored } => {
+                println!("Reconnected! {} accounts restored", accounts_restored);
             }
             AccountNotification::Heartbeat => {
                 // Connection is alive
