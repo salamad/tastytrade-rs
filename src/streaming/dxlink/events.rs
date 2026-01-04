@@ -291,3 +291,135 @@ impl DxEventTrait for TheoPrice {
         EventType::TheoPrice
     }
 }
+
+/// Time and Sales event - individual trade details.
+///
+/// This event provides detailed information about each individual trade,
+/// including time, price, size, and exchange information.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeAndSale {
+    /// Event symbol
+    pub event_symbol: String,
+    /// Event time in milliseconds
+    pub event_time: Option<i64>,
+    /// Event flags
+    pub event_flags: Option<i32>,
+    /// Index
+    pub index: Option<i64>,
+    /// Time in milliseconds
+    pub time: Option<i64>,
+    /// Time in nanoseconds (nano part)
+    pub time_nano_part: Option<i32>,
+    /// Sequence number
+    pub sequence: Option<i64>,
+    /// Exchange code
+    pub exchange_code: Option<String>,
+    /// Trade price
+    pub price: Option<Decimal>,
+    /// Trade size
+    pub size: Option<Decimal>,
+    /// Bid price at time of trade
+    pub bid_price: Option<Decimal>,
+    /// Ask price at time of trade
+    pub ask_price: Option<Decimal>,
+    /// Exchange sale conditions
+    pub exchange_sale_conditions: Option<String>,
+    /// Trade through exempt flag
+    pub trade_through_exempt: Option<bool>,
+    /// Aggressor side (BUY, SELL, or UNDEFINED)
+    pub aggressor_side: Option<String>,
+    /// Spread leg flag
+    pub spread_leg: Option<bool>,
+    /// Extended trading hours flag
+    pub extended_trading_hours: Option<bool>,
+    /// Valid tick flag
+    pub valid_tick: Option<bool>,
+    /// Type of trade (REGULAR, CANCEL, CORRECTION, AS_OF, etc.)
+    #[serde(rename = "type")]
+    pub trade_type: Option<String>,
+}
+
+impl DxEventTrait for TimeAndSale {
+    fn event_type() -> EventType {
+        EventType::TimeAndSale
+    }
+}
+
+/// Extended Trading Hours (ETH) Trade event.
+///
+/// Similar to Trade but specifically for extended hours trading sessions.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradeETH {
+    /// Event symbol
+    pub event_symbol: String,
+    /// Event time in milliseconds
+    pub event_time: Option<i64>,
+    /// Event flags
+    pub event_flags: Option<i32>,
+    /// Index
+    pub index: Option<i64>,
+    /// Time in milliseconds
+    pub time: Option<i64>,
+    /// Time in nanoseconds (nano part)
+    pub time_nano_part: Option<i32>,
+    /// Sequence number
+    pub sequence: Option<i64>,
+    /// Exchange code
+    pub exchange_code: Option<String>,
+    /// Last trade price
+    pub price: Option<Decimal>,
+    /// Change from previous close
+    pub change: Option<Decimal>,
+    /// Last trade size
+    pub size: Option<Decimal>,
+    /// Day volume
+    pub day_volume: Option<Decimal>,
+    /// Day turnover
+    pub day_turnover: Option<Decimal>,
+    /// Tick direction
+    pub tick_direction: Option<String>,
+    /// Extended trading hours flag (always true for TradeETH)
+    pub extended_trading_hours: Option<bool>,
+}
+
+impl DxEventTrait for TradeETH {
+    fn event_type() -> EventType {
+        EventType::TradeETH
+    }
+}
+
+/// Underlying event - information about the underlying security.
+///
+/// This provides data about the underlying instrument for derivatives.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Underlying {
+    /// Event symbol
+    pub event_symbol: String,
+    /// Event time in milliseconds
+    pub event_time: Option<i64>,
+    /// Event flags
+    pub event_flags: Option<i32>,
+    /// Sequence number
+    pub sequence: Option<i64>,
+    /// Volatility
+    pub volatility: Option<Decimal>,
+    /// Front month volatility
+    pub front_volatility: Option<Decimal>,
+    /// Back month volatility
+    pub back_volatility: Option<Decimal>,
+    /// Call volume
+    pub call_volume: Option<Decimal>,
+    /// Put volume
+    pub put_volume: Option<Decimal>,
+    /// Put/call volume ratio
+    pub put_call_ratio: Option<Decimal>,
+}
+
+impl DxEventTrait for Underlying {
+    fn event_type() -> EventType {
+        EventType::Underlying
+    }
+}

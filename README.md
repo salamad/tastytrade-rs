@@ -10,7 +10,7 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 
 - **Full API Coverage**: Accounts, orders, positions, balances, transactions, instruments, market data, watchlists
 - **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for order/position/balance notifications
-- **DXLink Enhancements**: COMPACT protocol format, proper handshake verification (AUTH_STATE, CHANNEL_OPENED), proactive keepalive, reconnection support, connection state tracking
+- **DXLink Enhancements**: COMPACT protocol format, multi-channel architecture, proper handshake verification, proactive keepalive, reconnection support, configurable settings, typed event filtering
 - **Account Streamer Enhancements**: Auto-reconnection with configurable backoff, connection state tracking, subscription inspection, typed order status helpers
 - **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
@@ -284,6 +284,80 @@ if !streamer.is_connected() {
 | `Profile` | Security profile and trading status |
 | `Candle` | Candlestick data |
 | `TheoPrice` | Theoretical option pricing |
+| `TimeAndSale` | Individual trade details with conditions |
+| `TradeETH` | Extended trading hours trades |
+| `Underlying` | Underlying security data for derivatives |
+
+#### DXLink Configuration
+
+Customize DXLink behavior with `DxLinkConfig`:
+
+```rust
+use tastytrade_rs::streaming::DxLinkConfig;
+
+// Preset configurations
+let default = DxLinkConfig::default();           // Balanced settings
+let low_latency = DxLinkConfig::low_latency();   // Minimal aggregation
+let bandwidth_opt = DxLinkConfig::bandwidth_optimized(); // Reduce bandwidth
+
+// Custom configuration
+let config = DxLinkConfig::new()
+    .with_aggregation_period(0.0)        // No aggregation (real-time)
+    .with_keepalive_interval_secs(20)    // More frequent keepalives
+    .with_event_buffer_capacity(4096);   // Larger buffer
+
+// Use custom config
+let streamer = client.streaming().dxlink_with_config(config).await?;
+```
+
+#### Candle Subscriptions
+
+Subscribe to candlestick data with period helpers:
+
+```rust
+use tastytrade_rs::streaming::CandlePeriod;
+
+// Subscribe to daily candles
+streamer.subscribe_candles(&["AAPL", "SPY"], CandlePeriod::Day).await?;
+
+// Subscribe to 5-minute candles
+streamer.subscribe_candles(&["SPY"], CandlePeriod::Minutes(5)).await?;
+
+// Subscribe to hourly candles
+streamer.subscribe_candles(&["QQQ"], CandlePeriod::Hour).await?;
+
+// Unsubscribe
+streamer.unsubscribe_candles(&["AAPL"], CandlePeriod::Day).await?;
+```
+
+#### Event Filtering
+
+Use helper methods for type-safe event handling:
+
+```rust
+while let Some(event) = streamer.next().await {
+    let event = event?;
+
+    // Get event metadata
+    println!("Symbol: {}", event.symbol());
+    println!("Type: {:?}", event.event_type());
+
+    // Type checking
+    if event.is_quote() {
+        if let Some(quote) = event.as_quote() {
+            println!("Bid: {:?}, Ask: {:?}", quote.bid_price, quote.ask_price);
+        }
+    } else if event.is_trade() {
+        if let Some(trade) = event.as_trade() {
+            println!("Trade: {:?} @ {:?}", trade.size, trade.price);
+        }
+    } else if event.is_greeks() {
+        if let Some(greeks) = event.as_greeks() {
+            println!("Delta: {:?}", greeks.delta);
+        }
+    }
+}
+```
 
 ### Account Activity Streaming
 

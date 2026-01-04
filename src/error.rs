@@ -94,6 +94,15 @@ pub enum Error {
     /// Resource not found (404)
     #[error("Not found: {0}")]
     NotFound(String),
+
+    /// WebSocket message too large (error code 1009)
+    ///
+    /// This error occurs when attempting to send or receive a message
+    /// that exceeds the WebSocket server's maximum message size.
+    /// For DXLink, this typically means subscribing to too many symbols
+    /// in a single request. Consider reducing batch sizes.
+    #[error("Message too large: {0}")]
+    MessageTooLarge(String),
 }
 
 impl Error {
@@ -141,6 +150,13 @@ impl Error {
         }
     }
 
+    /// Returns `true` if this is a message too large error (WebSocket code 1009).
+    ///
+    /// This typically indicates too many subscriptions in a single request.
+    pub fn is_message_too_large(&self) -> bool {
+        matches!(self, Error::MessageTooLarge(_))
+    }
+
     /// Create an API error from a response
     pub(crate) fn from_api_response(status: u16, body: Value) -> Self {
         let code = body
@@ -168,7 +184,67 @@ impl Error {
 #[cfg(feature = "streaming")]
 impl From<tokio_tungstenite::tungstenite::Error> for Error {
     fn from(err: tokio_tungstenite::tungstenite::Error) -> Self {
-        Error::WebSocket(err.to_string())
+        use tokio_tungstenite::tungstenite::error::Error as WsError;
+
+        // Check for 1009 (Message Too Big) close code
+        if let WsError::Protocol(protocol_err) = &err {
+            let err_str = protocol_err.to_string();
+            // Protocol error messages may contain the close code
+            if err_str.contains("1009") {
+                return Error::MessageTooLarge(
+                    "WebSocket message exceeded maximum size limit. \
+                    Try reducing the number of symbols per subscription request.".to_string()
+                );
+            }
+        }
+
+        // Check for close frame with 1009 code
+        if let WsError::ConnectionClosed = &err {
+            // Connection was closed normally, might be 1009
+            return Error::StreamDisconnected;
+        }
+
+        // Check if close frame directly indicates 1009
+        if let WsError::AlreadyClosed = &err {
+            return Error::StreamDisconnected;
+        }
+
+        // For close frames with specific codes
+        match &err {
+            WsError::Protocol(proto_err) => {
+                // Check if the protocol error contains close code 1009
+                let msg = proto_err.to_string();
+                if msg.contains("Message too big")
+                    || msg.contains("message too large")
+                    || msg.contains("1009")
+                {
+                    return Error::MessageTooLarge(format!(
+                        "Message too large: {}. Reduce subscription batch size.",
+                        msg
+                    ));
+                }
+                Error::WebSocket(err.to_string())
+            }
+            _ => Error::WebSocket(err.to_string()),
+        }
+    }
+}
+
+#[cfg(feature = "streaming")]
+impl Error {
+    /// Create a MessageTooLarge error from a WebSocket close code.
+    ///
+    /// WebSocket close code 1009 indicates a message exceeded the maximum size.
+    pub fn from_ws_close_code(code: u16, reason: &str) -> Self {
+        if code == 1009 {
+            Error::MessageTooLarge(format!(
+                "WebSocket close code 1009: {}. \
+                Reduce the number of symbols per subscription request.",
+                reason
+            ))
+        } else {
+            Error::WebSocket(format!("WebSocket closed with code {}: {}", code, reason))
+        }
     }
 }
 
@@ -212,6 +288,32 @@ mod tests {
                 assert_eq!(message, "Order validation failed");
             }
             _ => panic!("Expected Api error"),
+        }
+    }
+
+    #[test]
+    fn test_message_too_large() {
+        let err = Error::MessageTooLarge("test".to_string());
+        assert!(err.is_message_too_large());
+        assert!(!err.is_retryable()); // Not automatically retryable
+        assert!(!err.is_auth_error());
+    }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn test_from_ws_close_code_1009() {
+        let err = Error::from_ws_close_code(1009, "Message too big");
+        assert!(err.is_message_too_large());
+    }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn test_from_ws_close_code_other() {
+        let err = Error::from_ws_close_code(1000, "Normal closure");
+        assert!(!err.is_message_too_large());
+        match err {
+            Error::WebSocket(msg) => assert!(msg.contains("1000")),
+            _ => panic!("Expected WebSocket error"),
         }
     }
 }

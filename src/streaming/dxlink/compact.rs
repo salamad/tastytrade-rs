@@ -117,6 +117,51 @@ pub mod fields {
         "dividend",
         "interest",
     ];
+
+    /// TimeAndSale event fields in COMPACT format order.
+    pub const TIME_AND_SALE_FIELDS: &[&str] = &[
+        "eventType",
+        "eventSymbol",
+        "eventFlags",
+        "index",
+        "time",
+        "timeNanoPart",
+        "sequence",
+        "exchangeCode",
+        "price",
+        "size",
+        "bidPrice",
+        "askPrice",
+        "exchangeSaleConditions",
+        "aggressorSide",
+        "spreadLeg",
+        "extendedTradingHours",
+        "validTick",
+        "type",
+    ];
+
+    /// TradeETH event fields (same structure as Trade).
+    pub const TRADE_ETH_FIELDS: &[&str] = &[
+        "eventType",
+        "eventSymbol",
+        "price",
+        "dayVolume",
+        "size",
+    ];
+
+    /// Underlying event fields in COMPACT format order.
+    pub const UNDERLYING_FIELDS: &[&str] = &[
+        "eventType",
+        "eventSymbol",
+        "eventFlags",
+        "sequence",
+        "volatility",
+        "frontVolatility",
+        "backVolatility",
+        "callVolume",
+        "putVolume",
+        "putCallRatio",
+    ];
 }
 
 /// Helper to extract a string from a JSON value at a given index.
@@ -186,6 +231,17 @@ fn get_i64(arr: &[serde_json::Value], idx: usize) -> Option<i64> {
 /// Helper to extract an i32 from a JSON value at a given index.
 fn get_i32(arr: &[serde_json::Value], idx: usize) -> Option<i32> {
     get_i64(arr, idx).map(|n| n as i32)
+}
+
+/// Helper to extract a bool from a JSON value at a given index.
+fn get_bool(arr: &[serde_json::Value], idx: usize) -> Option<bool> {
+    arr.get(idx).and_then(|v| {
+        if v.is_null() {
+            None
+        } else {
+            v.as_bool()
+        }
+    })
 }
 
 /// Parse a Quote event from COMPACT format.
@@ -376,6 +432,89 @@ pub fn parse_theo_price(arr: &[serde_json::Value]) -> Option<TheoPrice> {
     })
 }
 
+/// Parse a TimeAndSale event from COMPACT format.
+///
+/// Expected field order: eventType, eventSymbol, eventFlags, index, time, timeNanoPart,
+/// sequence, exchangeCode, price, size, bidPrice, askPrice, exchangeSaleConditions,
+/// aggressorSide, spreadLeg, extendedTradingHours, validTick, type
+pub fn parse_time_and_sale(arr: &[serde_json::Value]) -> Option<TimeAndSale> {
+    if arr.len() < 2 {
+        return None;
+    }
+
+    Some(TimeAndSale {
+        event_symbol: get_string(arr, 1)?,
+        event_time: None,
+        event_flags: get_i32(arr, 2),
+        index: get_i64(arr, 3),
+        time: get_i64(arr, 4),
+        time_nano_part: get_i32(arr, 5),
+        sequence: get_i64(arr, 6),
+        exchange_code: get_string(arr, 7),
+        price: get_decimal(arr, 8),
+        size: get_decimal(arr, 9),
+        bid_price: get_decimal(arr, 10),
+        ask_price: get_decimal(arr, 11),
+        exchange_sale_conditions: get_string(arr, 12),
+        trade_through_exempt: None,
+        aggressor_side: get_string(arr, 13),
+        spread_leg: get_bool(arr, 14),
+        extended_trading_hours: get_bool(arr, 15),
+        valid_tick: get_bool(arr, 16),
+        trade_type: get_string(arr, 17),
+    })
+}
+
+/// Parse a TradeETH event from COMPACT format.
+///
+/// Expected field order: eventType, eventSymbol, price, dayVolume, size
+pub fn parse_trade_eth(arr: &[serde_json::Value]) -> Option<TradeETH> {
+    if arr.len() < 2 {
+        return None;
+    }
+
+    Some(TradeETH {
+        event_symbol: get_string(arr, 1)?,
+        event_time: None,
+        event_flags: None,
+        index: None,
+        time: None,
+        time_nano_part: None,
+        sequence: None,
+        exchange_code: None,
+        price: get_decimal(arr, 2),
+        change: None,
+        size: get_decimal(arr, 4),
+        day_volume: get_decimal(arr, 3),
+        day_turnover: None,
+        tick_direction: None,
+        extended_trading_hours: Some(true), // Always true for TradeETH
+    })
+}
+
+/// Parse an Underlying event from COMPACT format.
+///
+/// Expected field order: eventType, eventSymbol, eventFlags, sequence, volatility,
+/// frontVolatility, backVolatility, callVolume, putVolume, putCallRatio
+pub fn parse_underlying(arr: &[serde_json::Value]) -> Option<Underlying> {
+    if arr.len() < 2 {
+        return None;
+    }
+
+    Some(Underlying {
+        event_symbol: get_string(arr, 1)?,
+        event_time: None,
+        event_flags: get_i32(arr, 2),
+        sequence: get_i64(arr, 3),
+        volatility: get_decimal(arr, 4),
+        front_volatility: get_decimal(arr, 5),
+        back_volatility: get_decimal(arr, 6),
+        call_volume: get_decimal(arr, 7),
+        put_volume: get_decimal(arr, 8),
+        put_call_ratio: get_decimal(arr, 9),
+    })
+}
+
 /// Parse COMPACT format FEED_DATA and return parsed events.
 ///
 /// The data structure is: `["EventType", [event1_data, event2_data, ...]]`
@@ -437,12 +576,15 @@ pub fn parse_compact_feed_data(data: &serde_json::Value) -> Vec<super::DxEvent> 
 fn get_event_field_count(event_type: &str) -> usize {
     match event_type {
         "Quote" => fields::QUOTE_FIELDS.len(),
-        "Trade" | "TradeETH" => fields::TRADE_FIELDS.len(),
+        "Trade" => fields::TRADE_FIELDS.len(),
+        "TradeETH" => fields::TRADE_ETH_FIELDS.len(),
         "Greeks" => fields::GREEKS_FIELDS.len(),
         "Summary" => fields::SUMMARY_FIELDS.len(),
         "Profile" => fields::PROFILE_FIELDS.len(),
         "Candle" => fields::CANDLE_FIELDS.len(),
         "TheoPrice" => fields::THEO_PRICE_FIELDS.len(),
+        "TimeAndSale" => fields::TIME_AND_SALE_FIELDS.len(),
+        "Underlying" => fields::UNDERLYING_FIELDS.len(),
         _ => 0,
     }
 }
@@ -451,12 +593,15 @@ fn get_event_field_count(event_type: &str) -> usize {
 fn parse_single_event(event_type: &str, data: &[serde_json::Value]) -> Option<super::DxEvent> {
     match event_type {
         "Quote" => parse_quote(data).map(super::DxEvent::Quote),
-        "Trade" | "TradeETH" => parse_trade(data).map(super::DxEvent::Trade),
+        "Trade" => parse_trade(data).map(super::DxEvent::Trade),
+        "TradeETH" => parse_trade_eth(data).map(super::DxEvent::TradeETH),
         "Greeks" => parse_greeks(data).map(super::DxEvent::Greeks),
         "Summary" => parse_summary(data).map(super::DxEvent::Summary),
         "Profile" => parse_profile(data).map(super::DxEvent::Profile),
         "Candle" => parse_candle(data).map(super::DxEvent::Candle),
         "TheoPrice" => parse_theo_price(data).map(super::DxEvent::TheoPrice),
+        "TimeAndSale" => parse_time_and_sale(data).map(super::DxEvent::TimeAndSale),
+        "Underlying" => parse_underlying(data).map(super::DxEvent::Underlying),
         _ => None,
     }
 }
@@ -466,12 +611,14 @@ pub fn get_accept_event_fields() -> serde_json::Value {
     serde_json::json!({
         "Quote": fields::QUOTE_FIELDS,
         "Trade": fields::TRADE_FIELDS,
-        "TradeETH": fields::TRADE_FIELDS,
+        "TradeETH": fields::TRADE_ETH_FIELDS,
         "Greeks": fields::GREEKS_FIELDS,
         "Summary": fields::SUMMARY_FIELDS,
         "Profile": fields::PROFILE_FIELDS,
         "Candle": fields::CANDLE_FIELDS,
-        "TheoPrice": fields::THEO_PRICE_FIELDS
+        "TheoPrice": fields::THEO_PRICE_FIELDS,
+        "TimeAndSale": fields::TIME_AND_SALE_FIELDS,
+        "Underlying": fields::UNDERLYING_FIELDS
     })
 }
 
@@ -479,12 +626,15 @@ pub fn get_accept_event_fields() -> serde_json::Value {
 pub fn event_type_from_str(s: &str) -> Option<EventType> {
     match s {
         "Quote" => Some(EventType::Quote),
-        "Trade" | "TradeETH" => Some(EventType::Trade),
+        "Trade" => Some(EventType::Trade),
+        "TradeETH" => Some(EventType::TradeETH),
         "Greeks" => Some(EventType::Greeks),
         "Summary" => Some(EventType::Summary),
         "Profile" => Some(EventType::Profile),
         "Candle" => Some(EventType::Candle),
         "TheoPrice" => Some(EventType::TheoPrice),
+        "TimeAndSale" => Some(EventType::TimeAndSale),
+        "Underlying" => Some(EventType::Underlying),
         _ => None,
     }
 }
@@ -722,8 +872,10 @@ mod tests {
     fn test_event_type_from_str() {
         assert_eq!(event_type_from_str("Quote"), Some(EventType::Quote));
         assert_eq!(event_type_from_str("Trade"), Some(EventType::Trade));
-        assert_eq!(event_type_from_str("TradeETH"), Some(EventType::Trade));
+        assert_eq!(event_type_from_str("TradeETH"), Some(EventType::TradeETH));
         assert_eq!(event_type_from_str("Greeks"), Some(EventType::Greeks));
+        assert_eq!(event_type_from_str("TimeAndSale"), Some(EventType::TimeAndSale));
+        assert_eq!(event_type_from_str("Underlying"), Some(EventType::Underlying));
         assert_eq!(event_type_from_str("Unknown"), None);
     }
 

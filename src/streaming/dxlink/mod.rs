@@ -47,11 +47,6 @@ mod events;
 pub use compact::fields;
 pub use events::*;
 
-/// Keepalive interval in seconds.
-///
-/// Per DXLink protocol, the client must send KEEPALIVE every 30 seconds
-/// to prevent the 60-second timeout from closing the connection.
-const KEEPALIVE_INTERVAL_SECS: u64 = 30;
 
 /// DXLink market data streamer.
 ///
@@ -91,13 +86,16 @@ pub struct DxLinkStreamer {
     >>>,
     event_rx: mpsc::Receiver<Result<DxEvent>>,
     subscriptions: Arc<RwLock<HashMap<String, EventType>>>,
-    channel_id: i32,
+    /// Channel states for multi-channel architecture
+    channel_states: Arc<RwLock<HashMap<i32, ChannelState>>>,
     /// Connection state for keepalive task coordination
     connected: Arc<AtomicBool>,
     /// Client reference for reconnection
     client: Arc<ClientInner>,
     /// Reconnection configuration
     reconnect_config: ReconnectConfig,
+    /// DXLink configuration
+    config: DxLinkConfig,
 }
 
 /// DXLink event types.
@@ -117,10 +115,17 @@ pub enum EventType {
     Candle,
     /// Theoretical price
     TheoPrice,
+    /// Time and sales (individual trade details)
+    TimeAndSale,
+    /// Extended trading hours trades
+    TradeETH,
+    /// Underlying security information
+    Underlying,
 }
 
 impl EventType {
-    fn as_str(&self) -> &'static str {
+    /// Get the string representation for the DXLink protocol.
+    pub fn as_str(&self) -> &'static str {
         match self {
             EventType::Quote => "Quote",
             EventType::Trade => "Trade",
@@ -129,6 +134,238 @@ impl EventType {
             EventType::Profile => "Profile",
             EventType::Candle => "Candle",
             EventType::TheoPrice => "TheoPrice",
+            EventType::TimeAndSale => "TimeAndSale",
+            EventType::TradeETH => "TradeETH",
+            EventType::Underlying => "Underlying",
+        }
+    }
+
+    /// Get the dedicated channel ID for this event type.
+    ///
+    /// Per DXLink protocol best practices, each event type uses a separate
+    /// channel to allow independent configuration and management.
+    pub fn channel_id(&self) -> i32 {
+        match self {
+            EventType::Candle => 1,
+            EventType::Greeks => 3,
+            EventType::Profile => 5,
+            EventType::Quote => 7,
+            EventType::Summary => 9,
+            EventType::TheoPrice => 11,
+            EventType::TimeAndSale => 13,
+            EventType::Trade => 15,
+            EventType::TradeETH => 16,
+            EventType::Underlying => 17,
+        }
+    }
+
+    /// Get all event types.
+    pub fn all() -> &'static [EventType] {
+        &[
+            EventType::Quote,
+            EventType::Trade,
+            EventType::Greeks,
+            EventType::Summary,
+            EventType::Profile,
+            EventType::Candle,
+            EventType::TheoPrice,
+            EventType::TimeAndSale,
+            EventType::TradeETH,
+            EventType::Underlying,
+        ]
+    }
+}
+
+/// Channel state for tracking DXLink channel lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelState {
+    /// Channel has not been opened
+    Closed,
+    /// Channel open request sent, waiting for CHANNEL_OPENED
+    Opening,
+    /// Channel is open and ready for subscriptions
+    Opened,
+    /// Channel close request sent
+    Closing,
+}
+
+/// Candle period specification for candle subscriptions.
+///
+/// Candle symbols require a period suffix like `{=1d}` for daily candles.
+/// This enum provides type-safe period specifications.
+///
+/// # Example
+/// ```ignore
+/// // Subscribe to daily candles
+/// streamer.subscribe_candles(&["AAPL"], CandlePeriod::Day).await?;
+///
+/// // Subscribe to 5-minute candles
+/// streamer.subscribe_candles(&["SPY"], CandlePeriod::Minutes(5)).await?;
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CandlePeriod {
+    /// Tick-based candles
+    Tick,
+    /// Second-based candles (1 second)
+    Second,
+    /// Minute-based candles (default: 1 minute)
+    Minute,
+    /// Custom minute-based candles (e.g., 5, 15, 30 minutes)
+    Minutes(u32),
+    /// Hourly candles
+    Hour,
+    /// Custom hour-based candles (e.g., 4 hours)
+    Hours(u32),
+    /// Daily candles
+    Day,
+    /// Weekly candles
+    Week,
+    /// Monthly candles
+    Month,
+    /// Yearly candles
+    Year,
+}
+
+impl CandlePeriod {
+    /// Get the string representation for candle symbol suffix.
+    ///
+    /// Returns the period string without the curly braces.
+    pub fn as_str(&self) -> String {
+        match self {
+            CandlePeriod::Tick => "=t".to_string(),
+            CandlePeriod::Second => "=s".to_string(),
+            CandlePeriod::Minute => "=m".to_string(),
+            CandlePeriod::Minutes(n) => format!("={}m", n),
+            CandlePeriod::Hour => "=h".to_string(),
+            CandlePeriod::Hours(n) => format!("={}h", n),
+            CandlePeriod::Day => "=d".to_string(),
+            CandlePeriod::Week => "=w".to_string(),
+            CandlePeriod::Month => "=mo".to_string(),
+            CandlePeriod::Year => "=y".to_string(),
+        }
+    }
+}
+
+/// Configuration options for DXLink streaming.
+///
+/// This struct provides various settings to customize the DXLink connection
+/// behavior including timeouts, aggregation periods, and buffer sizes.
+///
+/// # Example
+/// ```ignore
+/// let config = DxLinkConfig::default()
+///     .with_aggregation_period(0.5)  // 500ms aggregation
+///     .with_keepalive_interval_secs(20);
+///
+/// let streamer = client.streaming()
+///     .dxlink_with_config(config).await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct DxLinkConfig {
+    /// Aggregation period in seconds for FEED_SETUP.
+    /// Lower values provide more real-time data but increase bandwidth.
+    /// Default: 0.1 (100ms)
+    pub aggregation_period: f64,
+
+    /// Keepalive interval in seconds.
+    /// Must be less than 60 seconds (the server timeout).
+    /// Default: 30 seconds
+    pub keepalive_interval_secs: u64,
+
+    /// Authentication timeout in seconds.
+    /// How long to wait for AUTH_STATE: AUTHORIZED response.
+    /// Default: 10 seconds
+    pub auth_timeout_secs: u64,
+
+    /// Channel open timeout in seconds.
+    /// How long to wait for CHANNEL_OPENED response.
+    /// Default: 10 seconds
+    pub channel_timeout_secs: u64,
+
+    /// Event buffer capacity.
+    /// Number of events to buffer before backpressure.
+    /// Default: 1024
+    pub event_buffer_capacity: usize,
+}
+
+impl Default for DxLinkConfig {
+    fn default() -> Self {
+        Self {
+            aggregation_period: 0.1,
+            keepalive_interval_secs: 30,
+            auth_timeout_secs: 10,
+            channel_timeout_secs: 10,
+            event_buffer_capacity: 1024,
+        }
+    }
+}
+
+impl DxLinkConfig {
+    /// Create a new configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the aggregation period in seconds.
+    ///
+    /// Lower values (e.g., 0.0) provide more real-time data but increase
+    /// bandwidth usage. Higher values (e.g., 1.0) reduce bandwidth but
+    /// add latency.
+    pub fn with_aggregation_period(mut self, period: f64) -> Self {
+        self.aggregation_period = period;
+        self
+    }
+
+    /// Set the keepalive interval in seconds.
+    ///
+    /// Must be less than 60 seconds to prevent the server from closing
+    /// the connection.
+    pub fn with_keepalive_interval_secs(mut self, secs: u64) -> Self {
+        self.keepalive_interval_secs = secs.min(59); // Must be < 60
+        self
+    }
+
+    /// Set the authentication timeout in seconds.
+    pub fn with_auth_timeout_secs(mut self, secs: u64) -> Self {
+        self.auth_timeout_secs = secs;
+        self
+    }
+
+    /// Set the channel open timeout in seconds.
+    pub fn with_channel_timeout_secs(mut self, secs: u64) -> Self {
+        self.channel_timeout_secs = secs;
+        self
+    }
+
+    /// Set the event buffer capacity.
+    pub fn with_event_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.event_buffer_capacity = capacity;
+        self
+    }
+
+    /// Create a low-latency configuration.
+    ///
+    /// Optimized for real-time trading with minimal aggregation.
+    pub fn low_latency() -> Self {
+        Self {
+            aggregation_period: 0.0,
+            keepalive_interval_secs: 15,
+            auth_timeout_secs: 5,
+            channel_timeout_secs: 5,
+            event_buffer_capacity: 4096,
+        }
+    }
+
+    /// Create a bandwidth-optimized configuration.
+    ///
+    /// Reduces network usage at the cost of some latency.
+    pub fn bandwidth_optimized() -> Self {
+        Self {
+            aggregation_period: 1.0,
+            keepalive_interval_secs: 30,
+            auth_timeout_secs: 15,
+            channel_timeout_secs: 15,
+            event_buffer_capacity: 512,
         }
     }
 }
@@ -140,6 +377,27 @@ pub trait DxEventTrait: Sized + for<'de> Deserialize<'de> {
 }
 
 /// Union of all DXLink event types.
+///
+/// Provides type-safe access to market data events with convenient helper methods
+/// for filtering and extraction.
+///
+/// # Example
+/// ```ignore
+/// while let Some(event) = streamer.next_event().await? {
+///     // Check event type
+///     if event.is_quote() {
+///         if let Some(quote) = event.as_quote() {
+///             println!("Bid: {:?}, Ask: {:?}", quote.bid_price, quote.ask_price);
+///         }
+///     }
+///
+///     // Get the symbol for any event
+///     println!("Symbol: {}", event.symbol());
+///
+///     // Get the event type
+///     println!("Type: {:?}", event.event_type());
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub enum DxEvent {
     /// Quote event
@@ -156,14 +414,189 @@ pub enum DxEvent {
     Candle(Candle),
     /// Theoretical price event
     TheoPrice(TheoPrice),
+    /// Time and sales event
+    TimeAndSale(TimeAndSale),
+    /// Extended trading hours trade event
+    TradeETH(TradeETH),
+    /// Underlying security event
+    Underlying(Underlying),
 }
 
-/// Timeout for waiting for authentication responses.
-const AUTH_TIMEOUT_SECS: u64 = 10;
+impl DxEvent {
+    /// Get the event type of this event.
+    pub fn event_type(&self) -> EventType {
+        match self {
+            DxEvent::Quote(_) => EventType::Quote,
+            DxEvent::Trade(_) => EventType::Trade,
+            DxEvent::Greeks(_) => EventType::Greeks,
+            DxEvent::Summary(_) => EventType::Summary,
+            DxEvent::Profile(_) => EventType::Profile,
+            DxEvent::Candle(_) => EventType::Candle,
+            DxEvent::TheoPrice(_) => EventType::TheoPrice,
+            DxEvent::TimeAndSale(_) => EventType::TimeAndSale,
+            DxEvent::TradeETH(_) => EventType::TradeETH,
+            DxEvent::Underlying(_) => EventType::Underlying,
+        }
+    }
+
+    /// Get the symbol associated with this event.
+    pub fn symbol(&self) -> &str {
+        match self {
+            DxEvent::Quote(e) => &e.event_symbol,
+            DxEvent::Trade(e) => &e.event_symbol,
+            DxEvent::Greeks(e) => &e.event_symbol,
+            DxEvent::Summary(e) => &e.event_symbol,
+            DxEvent::Profile(e) => &e.event_symbol,
+            DxEvent::Candle(e) => &e.event_symbol,
+            DxEvent::TheoPrice(e) => &e.event_symbol,
+            DxEvent::TimeAndSale(e) => &e.event_symbol,
+            DxEvent::TradeETH(e) => &e.event_symbol,
+            DxEvent::Underlying(e) => &e.event_symbol,
+        }
+    }
+
+    /// Returns true if this is a Quote event.
+    pub fn is_quote(&self) -> bool {
+        matches!(self, DxEvent::Quote(_))
+    }
+
+    /// Returns true if this is a Trade event.
+    pub fn is_trade(&self) -> bool {
+        matches!(self, DxEvent::Trade(_))
+    }
+
+    /// Returns true if this is a Greeks event.
+    pub fn is_greeks(&self) -> bool {
+        matches!(self, DxEvent::Greeks(_))
+    }
+
+    /// Returns true if this is a Summary event.
+    pub fn is_summary(&self) -> bool {
+        matches!(self, DxEvent::Summary(_))
+    }
+
+    /// Returns true if this is a Profile event.
+    pub fn is_profile(&self) -> bool {
+        matches!(self, DxEvent::Profile(_))
+    }
+
+    /// Returns true if this is a Candle event.
+    pub fn is_candle(&self) -> bool {
+        matches!(self, DxEvent::Candle(_))
+    }
+
+    /// Returns true if this is a TheoPrice event.
+    pub fn is_theo_price(&self) -> bool {
+        matches!(self, DxEvent::TheoPrice(_))
+    }
+
+    /// Returns true if this is a TimeAndSale event.
+    pub fn is_time_and_sale(&self) -> bool {
+        matches!(self, DxEvent::TimeAndSale(_))
+    }
+
+    /// Returns true if this is a TradeETH event.
+    pub fn is_trade_eth(&self) -> bool {
+        matches!(self, DxEvent::TradeETH(_))
+    }
+
+    /// Returns true if this is an Underlying event.
+    pub fn is_underlying(&self) -> bool {
+        matches!(self, DxEvent::Underlying(_))
+    }
+
+    /// Try to get a reference to the Quote, if this is a Quote event.
+    pub fn as_quote(&self) -> Option<&Quote> {
+        match self {
+            DxEvent::Quote(q) => Some(q),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the Trade, if this is a Trade event.
+    pub fn as_trade(&self) -> Option<&Trade> {
+        match self {
+            DxEvent::Trade(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the Greeks, if this is a Greeks event.
+    pub fn as_greeks(&self) -> Option<&Greeks> {
+        match self {
+            DxEvent::Greeks(g) => Some(g),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the Summary, if this is a Summary event.
+    pub fn as_summary(&self) -> Option<&Summary> {
+        match self {
+            DxEvent::Summary(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the Profile, if this is a Profile event.
+    pub fn as_profile(&self) -> Option<&Profile> {
+        match self {
+            DxEvent::Profile(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the Candle, if this is a Candle event.
+    pub fn as_candle(&self) -> Option<&Candle> {
+        match self {
+            DxEvent::Candle(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the TheoPrice, if this is a TheoPrice event.
+    pub fn as_theo_price(&self) -> Option<&TheoPrice> {
+        match self {
+            DxEvent::TheoPrice(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the TimeAndSale, if this is a TimeAndSale event.
+    pub fn as_time_and_sale(&self) -> Option<&TimeAndSale> {
+        match self {
+            DxEvent::TimeAndSale(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the TradeETH, if this is a TradeETH event.
+    pub fn as_trade_eth(&self) -> Option<&TradeETH> {
+        match self {
+            DxEvent::TradeETH(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Try to get a reference to the Underlying, if this is an Underlying event.
+    pub fn as_underlying(&self) -> Option<&Underlying> {
+        match self {
+            DxEvent::Underlying(u) => Some(u),
+            _ => None,
+        }
+    }
+}
 
 impl DxLinkStreamer {
-    /// Connect to the DXLink streaming service.
+    /// Connect to the DXLink streaming service with default configuration.
     pub(crate) async fn connect(client: Arc<ClientInner>) -> Result<Self> {
+        Self::connect_with_config(client, DxLinkConfig::default()).await
+    }
+
+    /// Connect to the DXLink streaming service with custom configuration.
+    pub(crate) async fn connect_with_config(
+        client: Arc<ClientInner>,
+        config: DxLinkConfig,
+    ) -> Result<Self> {
         // Get the API quote token
         let token = Self::get_quote_token(&client).await?;
 
@@ -171,51 +604,62 @@ impl DxLinkStreamer {
         let url = client.session.environment().await.dxlink_url();
         let (ws_stream, _) = connect_async(url).await?;
 
-        // Channel ID for the feed channel
-        let channel_id = 1;
-
-        // Perform full DXLink handshake (verifies AUTH_STATE and CHANNEL_OPENED)
-        let (write, read) = Self::perform_handshake(ws_stream, &token, channel_id).await?;
+        // Perform authentication handshake (no channels opened yet)
+        let (write, read) = Self::perform_auth_handshake(ws_stream, &token, &config).await?;
 
         let write = Arc::new(RwLock::new(write));
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
+        let channel_states = Arc::new(RwLock::new(HashMap::new()));
         let connected = Arc::new(AtomicBool::new(true));
 
-        // Create event channel
-        let (event_tx, event_rx) = mpsc::channel(1024);
+        // Create event channel with configured capacity
+        let (event_tx, event_rx) = mpsc::channel(config.event_buffer_capacity);
 
         // Start message processing task
         let write_clone = write.clone();
         let subs_clone = subscriptions.clone();
         let connected_clone = connected.clone();
+        let channel_states_clone = channel_states.clone();
         tokio::spawn(async move {
-            Self::process_messages(read, event_tx, write_clone, subs_clone, connected_clone).await;
+            Self::process_messages(read, event_tx, write_clone, subs_clone, connected_clone, channel_states_clone).await;
         });
 
-        // Start keepalive task (sends KEEPALIVE every 30 seconds)
+        // Start keepalive task with configured interval
         let keepalive_write = write.clone();
         let keepalive_connected = connected.clone();
+        let keepalive_interval = config.keepalive_interval_secs;
         tokio::spawn(async move {
-            Self::keepalive_task(keepalive_write, keepalive_connected).await;
+            Self::keepalive_task_with_interval(keepalive_write, keepalive_connected, keepalive_interval).await;
         });
 
         Ok(Self {
             write,
             event_rx,
             subscriptions,
-            channel_id,
+            channel_states,
             connected,
             client,
             reconnect_config: ReconnectConfig::default(),
+            config,
         })
+    }
+
+    /// Get the current DXLink configuration.
+    pub fn config(&self) -> &DxLinkConfig {
+        &self.config
     }
 
     /// Subscribe to events for the given symbols.
     ///
     /// Each symbol is sent as a separate entry in the subscription message,
-    /// per DXLink protocol requirements.
+    /// per DXLink protocol requirements. Channels are opened automatically
+    /// on first subscription for each event type.
     pub async fn subscribe<E: DxEventTrait>(&mut self, symbols: &[&str]) -> Result<()> {
         let event_type = E::event_type();
+        let channel_id = event_type.channel_id();
+
+        // Ensure the channel for this event type is open
+        self.ensure_channel_open(event_type).await?;
 
         // Build add array with one entry per symbol (per DXLink protocol)
         let add: Vec<_> = symbols
@@ -230,7 +674,7 @@ impl DxLinkStreamer {
 
         let msg = serde_json::json!({
             "type": "FEED_SUBSCRIPTION",
-            "channel": self.channel_id,
+            "channel": channel_id,
             "add": add
         });
 
@@ -245,12 +689,130 @@ impl DxLinkStreamer {
         Ok(())
     }
 
+    /// Ensure the channel for an event type is open.
+    ///
+    /// Opens the channel if not already open, sending CHANNEL_REQUEST and FEED_SETUP.
+    async fn ensure_channel_open(&self, event_type: EventType) -> Result<()> {
+        let channel_id = event_type.channel_id();
+
+        // Check if channel is already open
+        {
+            let states = self.channel_states.read().await;
+            if let Some(ChannelState::Opened) = states.get(&channel_id) {
+                return Ok(());
+            }
+        }
+
+        // Mark channel as opening
+        {
+            let mut states = self.channel_states.write().await;
+            states.insert(channel_id, ChannelState::Opening);
+        }
+
+        // Send CHANNEL_REQUEST
+        let channel_request = serde_json::json!({
+            "type": "CHANNEL_REQUEST",
+            "channel": channel_id,
+            "service": "FEED",
+            "parameters": {
+                "contract": "AUTO"
+            }
+        });
+        self.send_message(&channel_request).await?;
+
+        // Wait for CHANNEL_OPENED (handled by process_messages)
+        // Poll the channel state until opened or timeout
+        let timeout = Duration::from_secs(self.config.channel_timeout_secs);
+        let start = std::time::Instant::now();
+
+        loop {
+            {
+                let states = self.channel_states.read().await;
+                if let Some(ChannelState::Opened) = states.get(&channel_id) {
+                    break;
+                }
+            }
+
+            if start.elapsed() > timeout {
+                return Err(Error::Timeout(format!(
+                    "Waiting for CHANNEL_OPENED on channel {}",
+                    channel_id
+                )));
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Send FEED_SETUP for this channel using configured aggregation period
+        let feed_setup = serde_json::json!({
+            "type": "FEED_SETUP",
+            "channel": channel_id,
+            "acceptAggregationPeriod": self.config.aggregation_period,
+            "acceptDataFormat": "COMPACT",
+            "acceptEventFields": compact::get_accept_event_fields()
+        });
+        self.send_message(&feed_setup).await?;
+
+        Ok(())
+    }
+
+    /// Subscribe to candle events for the given symbols with specified period.
+    ///
+    /// Candle subscriptions require special symbol syntax. This helper method
+    /// constructs the proper candle symbol format: `SYMBOL{=PERIOD}`.
+    ///
+    /// # Arguments
+    /// * `symbols` - Base symbols to subscribe to (e.g., "AAPL", "SPY")
+    /// * `period` - Candle period specification
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Subscribe to daily candles for AAPL and SPY
+    /// streamer.subscribe_candles(&["AAPL", "SPY"], CandlePeriod::Day).await?;
+    ///
+    /// // Subscribe to hourly candles
+    /// streamer.subscribe_candles(&["AAPL"], CandlePeriod::Hour).await?;
+    /// ```
+    pub async fn subscribe_candles(
+        &mut self,
+        symbols: &[&str],
+        period: CandlePeriod,
+    ) -> Result<()> {
+        let candle_symbols: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}{{{}}}", s, period.as_str()))
+            .collect();
+
+        let symbol_refs: Vec<&str> = candle_symbols.iter().map(|s| s.as_str()).collect();
+        self.subscribe::<Candle>(&symbol_refs).await
+    }
+
+    /// Unsubscribe from candle events for the given symbols with specified period.
+    ///
+    /// # Arguments
+    /// * `symbols` - Base symbols to unsubscribe from (e.g., "AAPL", "SPY")
+    /// * `period` - Candle period specification (must match the subscription)
+    pub async fn unsubscribe_candles(
+        &mut self,
+        symbols: &[&str],
+        period: CandlePeriod,
+    ) -> Result<()> {
+        let candle_symbols: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}{{{}}}", s, period.as_str()))
+            .collect();
+
+        let symbol_refs: Vec<&str> = candle_symbols.iter().map(|s| s.as_str()).collect();
+        self.unsubscribe::<Candle>(&symbol_refs).await
+    }
+
     /// Unsubscribe from events for the given symbols.
     ///
     /// Each symbol is sent as a separate entry in the unsubscribe message,
     /// per DXLink protocol requirements.
     pub async fn unsubscribe<E: DxEventTrait>(&mut self, symbols: &[&str]) -> Result<()> {
         let event_type = E::event_type();
+        let channel_id = event_type.channel_id();
 
         // Build remove array with one entry per symbol (per DXLink protocol)
         let remove: Vec<_> = symbols
@@ -265,7 +827,7 @@ impl DxLinkStreamer {
 
         let msg = serde_json::json!({
             "type": "FEED_SUBSCRIPTION",
-            "channel": self.channel_id,
+            "channel": channel_id,
             "remove": remove
         });
 
@@ -278,6 +840,22 @@ impl DxLinkStreamer {
         }
 
         Ok(())
+    }
+
+    /// Get the state of a specific channel.
+    pub async fn channel_state(&self, channel_id: i32) -> ChannelState {
+        let states = self.channel_states.read().await;
+        states.get(&channel_id).copied().unwrap_or(ChannelState::Closed)
+    }
+
+    /// Get all open channels.
+    pub async fn open_channels(&self) -> Vec<i32> {
+        let states = self.channel_states.read().await;
+        states
+            .iter()
+            .filter(|(_, state)| **state == ChannelState::Opened)
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     /// Get the next event.
@@ -328,7 +906,7 @@ impl DxLinkStreamer {
     /// 1. Close the existing connection (if any)
     /// 2. Establish a new WebSocket connection
     /// 3. Re-authenticate with DXLink
-    /// 4. Re-subscribe to all previously subscribed symbols
+    /// 4. Re-open channels and re-subscribe to all previously subscribed symbols
     ///
     /// Returns `Ok(())` if reconnection succeeds.
     ///
@@ -351,6 +929,12 @@ impl DxLinkStreamer {
                 .collect()
         };
 
+        // Reset channel states (all channels need to be re-opened)
+        {
+            let mut states = self.channel_states.write().await;
+            states.clear();
+        }
+
         // Get a fresh quote token
         let token = Self::get_quote_token(&self.client).await?;
 
@@ -358,14 +942,14 @@ impl DxLinkStreamer {
         let url = self.client.session.environment().await.dxlink_url();
         let (ws_stream, _) = connect_async(url).await?;
 
-        // Perform handshake
-        let (write, read) = Self::perform_handshake(ws_stream, &token, self.channel_id).await?;
+        // Perform authentication handshake (no channels opened yet)
+        let (write, read) = Self::perform_auth_handshake(ws_stream, &token, &self.config).await?;
 
         // Update write handle
         *self.write.write().await = write;
 
-        // Create new event channel
-        let (event_tx, event_rx) = mpsc::channel(1024);
+        // Create new event channel with configured capacity
+        let (event_tx, event_rx) = mpsc::channel(self.config.event_buffer_capacity);
         self.event_rx = event_rx;
 
         // Mark as connected
@@ -375,24 +959,30 @@ impl DxLinkStreamer {
         let write_clone = self.write.clone();
         let subs_clone = self.subscriptions.clone();
         let connected_clone = self.connected.clone();
+        let channel_states_clone = self.channel_states.clone();
         tokio::spawn(async move {
-            Self::process_messages(read, event_tx, write_clone, subs_clone, connected_clone).await;
+            Self::process_messages(read, event_tx, write_clone, subs_clone, connected_clone, channel_states_clone).await;
         });
 
-        // Start new keepalive task
+        // Start new keepalive task with configured interval
         let keepalive_write = self.write.clone();
         let keepalive_connected = self.connected.clone();
+        let keepalive_interval = self.config.keepalive_interval_secs;
         tokio::spawn(async move {
-            Self::keepalive_task(keepalive_write, keepalive_connected).await;
+            Self::keepalive_task_with_interval(keepalive_write, keepalive_connected, keepalive_interval).await;
         });
 
         // Re-subscribe to all symbols, grouped by event type
+        // This will automatically re-open channels via ensure_channel_open
         let mut by_type: HashMap<EventType, Vec<String>> = HashMap::new();
         for (symbol, event_type) in subscriptions {
             by_type.entry(event_type).or_default().push(symbol);
         }
 
         for (event_type, symbols) in by_type {
+            // Ensure channel is open for this event type
+            self.ensure_channel_open(event_type).await?;
+
             // Build add array with one entry per symbol
             let add: Vec<_> = symbols
                 .iter()
@@ -404,9 +994,10 @@ impl DxLinkStreamer {
                 })
                 .collect();
 
+            let channel_id = event_type.channel_id();
             let msg = serde_json::json!({
                 "type": "FEED_SUBSCRIPTION",
-                "channel": self.channel_id,
+                "channel": channel_id,
                 "add": add
             });
 
@@ -453,29 +1044,23 @@ impl DxLinkStreamer {
         Ok(data.token)
     }
 
-    /// Default aggregation period in seconds for FEED_SETUP.
-    /// 0.1 seconds = 100ms, which provides a good balance between
-    /// latency and bandwidth.
-    const DEFAULT_AGGREGATION_PERIOD: f64 = 0.1;
-
     /// DXLink protocol version.
     const DXLINK_VERSION: &'static str = "0.1-DXF-JS/0.3.0";
 
-    /// Perform the full DXLink handshake with response verification.
+    /// Perform the authentication handshake with the DXLink server.
     ///
-    /// This implements the proper DXLink protocol sequence:
+    /// This implements the authentication portion of the DXLink protocol:
     /// 1. SETUP → wait for SETUP response
     /// 2. AUTH → wait for AUTH_STATE: AUTHORIZED
-    /// 3. CHANNEL_REQUEST → wait for CHANNEL_OPENED
-    /// 4. FEED_SETUP → wait for FEED_CONFIG
     ///
+    /// Channels are opened lazily on first subscription to each event type.
     /// Returns the split WebSocket stream after successful authentication.
-    async fn perform_handshake(
+    async fn perform_auth_handshake(
         mut ws_stream: tokio_tungstenite::WebSocketStream<
             tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
         >,
         token: &str,
-        channel_id: i32,
+        config: &DxLinkConfig,
     ) -> Result<(
         futures_util::stream::SplitSink<
             tokio_tungstenite::WebSocketStream<
@@ -510,8 +1095,7 @@ impl DxLinkStreamer {
         ws_stream.send(Message::Text(auth.to_string())).await?;
 
         // Step 3: Wait for AUTH_STATE: AUTHORIZED
-        let auth_timeout = Duration::from_secs(AUTH_TIMEOUT_SECS);
-        let mut authorized = false;
+        let auth_timeout = Duration::from_secs(config.auth_timeout_secs);
 
         loop {
             let msg = timeout(auth_timeout, ws_stream.next())
@@ -527,8 +1111,8 @@ impl DxLinkStreamer {
                                     if let Some(state) = json.get("state").and_then(|s| s.as_str())
                                     {
                                         if state == "AUTHORIZED" {
-                                            authorized = true;
-                                            break;
+                                            // Authentication successful, split and return
+                                            return Ok(ws_stream.split());
                                         } else if state == "UNAUTHORIZED" {
                                             // Initial state, continue waiting
                                             continue;
@@ -571,152 +1155,6 @@ impl DxLinkStreamer {
                 _ => continue,
             }
         }
-
-        if !authorized {
-            return Err(Error::Authentication(
-                "Failed to receive AUTH_STATE: AUTHORIZED".to_string(),
-            ));
-        }
-
-        // Step 4: Send CHANNEL_REQUEST
-        let channel_request = serde_json::json!({
-            "type": "CHANNEL_REQUEST",
-            "channel": channel_id,
-            "service": "FEED",
-            "parameters": {
-                "contract": "AUTO"
-            }
-        });
-        ws_stream
-            .send(Message::Text(channel_request.to_string()))
-            .await?;
-
-        // Step 5: Wait for CHANNEL_OPENED
-        let mut channel_opened = false;
-
-        loop {
-            let msg = timeout(auth_timeout, ws_stream.next())
-                .await
-                .map_err(|_| Error::Timeout("Waiting for CHANNEL_OPENED".to_string()))?;
-
-            match msg {
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(msg_type) = json.get("type").and_then(|t| t.as_str()) {
-                            match msg_type {
-                                "CHANNEL_OPENED" => {
-                                    // Verify it's for our channel
-                                    if json.get("channel").and_then(|c| c.as_i64())
-                                        == Some(channel_id as i64)
-                                    {
-                                        channel_opened = true;
-                                        break;
-                                    }
-                                }
-                                "KEEPALIVE" => {
-                                    // Respond to keepalive
-                                    let response = serde_json::json!({
-                                        "type": "KEEPALIVE",
-                                        "channel": 0
-                                    });
-                                    ws_stream.send(Message::Text(response.to_string())).await?;
-                                }
-                                "ERROR" => {
-                                    let error_msg = json
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Unknown error");
-                                    return Err(Error::Authentication(error_msg.to_string()));
-                                }
-                                _ => continue,
-                            }
-                        }
-                    }
-                }
-                Some(Ok(Message::Ping(data))) => {
-                    ws_stream.send(Message::Pong(data)).await?;
-                }
-                Some(Ok(Message::Close(_))) => {
-                    return Err(Error::StreamDisconnected);
-                }
-                Some(Err(e)) => {
-                    return Err(Error::WebSocket(e.to_string()));
-                }
-                None => {
-                    return Err(Error::StreamDisconnected);
-                }
-                _ => continue,
-            }
-        }
-
-        if !channel_opened {
-            return Err(Error::Authentication(
-                "Failed to receive CHANNEL_OPENED".to_string(),
-            ));
-        }
-
-        // Step 6: Send FEED_SETUP
-        let feed_setup = serde_json::json!({
-            "type": "FEED_SETUP",
-            "channel": channel_id,
-            "acceptAggregationPeriod": Self::DEFAULT_AGGREGATION_PERIOD,
-            "acceptDataFormat": "COMPACT",
-            "acceptEventFields": compact::get_accept_event_fields()
-        });
-        ws_stream.send(Message::Text(feed_setup.to_string())).await?;
-
-        // Step 7: Wait for FEED_CONFIG (optional but good for verification)
-        loop {
-            let msg = timeout(auth_timeout, ws_stream.next())
-                .await
-                .map_err(|_| Error::Timeout("Waiting for FEED_CONFIG".to_string()))?;
-
-            match msg {
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(msg_type) = json.get("type").and_then(|t| t.as_str()) {
-                            match msg_type {
-                                "FEED_CONFIG" => {
-                                    // Feed is configured, we're done
-                                    break;
-                                }
-                                "KEEPALIVE" => {
-                                    let response = serde_json::json!({
-                                        "type": "KEEPALIVE",
-                                        "channel": 0
-                                    });
-                                    ws_stream.send(Message::Text(response.to_string())).await?;
-                                }
-                                "ERROR" => {
-                                    let error_msg = json
-                                        .get("message")
-                                        .and_then(|m| m.as_str())
-                                        .unwrap_or("Unknown error");
-                                    return Err(Error::Authentication(error_msg.to_string()));
-                                }
-                                _ => continue,
-                            }
-                        }
-                    }
-                }
-                Some(Ok(Message::Ping(data))) => {
-                    ws_stream.send(Message::Pong(data)).await?;
-                }
-                Some(Ok(Message::Close(_))) => {
-                    return Err(Error::StreamDisconnected);
-                }
-                Some(Err(e)) => {
-                    return Err(Error::WebSocket(e.to_string()));
-                }
-                None => {
-                    return Err(Error::StreamDisconnected);
-                }
-                _ => continue,
-            }
-        }
-
-        // Split the stream for async processing
-        Ok(ws_stream.split())
     }
 
     async fn send_message(&self, msg: &serde_json::Value) -> Result<()> {
@@ -725,11 +1163,11 @@ impl DxLinkStreamer {
         Ok(())
     }
 
-    /// Background task that sends KEEPALIVE messages every 30 seconds.
+    /// Background task that sends KEEPALIVE messages at the configured interval.
     ///
     /// Per DXLink protocol, the client must proactively send KEEPALIVE
     /// to prevent the 60-second timeout from closing the connection.
-    async fn keepalive_task(
+    async fn keepalive_task_with_interval(
         write: Arc<RwLock<futures_util::stream::SplitSink<
             tokio_tungstenite::WebSocketStream<
                 tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -737,8 +1175,9 @@ impl DxLinkStreamer {
             Message,
         >>>,
         connected: Arc<AtomicBool>,
+        interval_secs: u64,
     ) {
-        let mut interval = tokio::time::interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
         loop {
             interval.tick().await;
@@ -777,6 +1216,7 @@ impl DxLinkStreamer {
         >>>,
         _subscriptions: Arc<RwLock<HashMap<String, EventType>>>,
         connected: Arc<AtomicBool>,
+        channel_states: Arc<RwLock<HashMap<i32, ChannelState>>>,
     ) {
         while let Some(msg) = read.next().await {
             match msg {
@@ -793,6 +1233,20 @@ impl DxLinkStreamer {
                                                 return;
                                             }
                                         }
+                                    }
+                                }
+                                "CHANNEL_OPENED" => {
+                                    // Update channel state to Opened
+                                    if let Some(channel_id) = json.get("channel").and_then(|c| c.as_i64()) {
+                                        let mut states = channel_states.write().await;
+                                        states.insert(channel_id as i32, ChannelState::Opened);
+                                    }
+                                }
+                                "CHANNEL_CLOSED" => {
+                                    // Update channel state to Closed
+                                    if let Some(channel_id) = json.get("channel").and_then(|c| c.as_i64()) {
+                                        let mut states = channel_states.write().await;
+                                        states.insert(channel_id as i32, ChannelState::Closed);
                                     }
                                 }
                                 "KEEPALIVE" => {
@@ -816,14 +1270,35 @@ impl DxLinkStreamer {
                     let mut w = write.write().await;
                     let _ = w.send(Message::Pong(data)).await;
                 }
-                Ok(Message::Close(_)) => {
+                Ok(Message::Close(close_frame)) => {
                     connected.store(false, Ordering::SeqCst);
-                    let _ = event_tx.send(Err(Error::StreamDisconnected)).await;
+
+                    // Check for specific close codes
+                    if let Some(frame) = close_frame {
+                        let code = frame.code.into();
+                        let reason = frame.reason.to_string();
+
+                        // Handle 1009 (Message Too Big) specially
+                        if code == 1009 {
+                            let _ = event_tx.send(Err(Error::MessageTooLarge(format!(
+                                "WebSocket closed with code 1009: {}. \
+                                Reduce subscription batch sizes.",
+                                reason
+                            )))).await;
+                            return;
+                        }
+
+                        // Handle other close codes
+                        let _ = event_tx.send(Err(Error::from_ws_close_code(code, &reason))).await;
+                    } else {
+                        let _ = event_tx.send(Err(Error::StreamDisconnected)).await;
+                    }
                     return;
                 }
                 Err(e) => {
                     connected.store(false, Ordering::SeqCst);
-                    let _ = event_tx.send(Err(Error::WebSocket(e.to_string()))).await;
+                    // Convert the error, which may be a 1009 error
+                    let _ = event_tx.send(Err(e.into())).await;
                     return;
                 }
                 _ => {}
@@ -966,5 +1441,149 @@ mod tests {
 
         let events = DxLinkStreamer::parse_feed_data(&json);
         assert!(events.is_none());
+    }
+
+    #[test]
+    fn test_candle_period_as_str() {
+        assert_eq!(CandlePeriod::Tick.as_str(), "=t");
+        assert_eq!(CandlePeriod::Second.as_str(), "=s");
+        assert_eq!(CandlePeriod::Minute.as_str(), "=m");
+        assert_eq!(CandlePeriod::Minutes(5).as_str(), "=5m");
+        assert_eq!(CandlePeriod::Minutes(15).as_str(), "=15m");
+        assert_eq!(CandlePeriod::Hour.as_str(), "=h");
+        assert_eq!(CandlePeriod::Hours(4).as_str(), "=4h");
+        assert_eq!(CandlePeriod::Day.as_str(), "=d");
+        assert_eq!(CandlePeriod::Week.as_str(), "=w");
+        assert_eq!(CandlePeriod::Month.as_str(), "=mo");
+        assert_eq!(CandlePeriod::Year.as_str(), "=y");
+    }
+
+    #[test]
+    fn test_candle_symbol_format() {
+        // Verify the expected candle symbol format
+        let symbol = "AAPL";
+        let period = CandlePeriod::Day;
+        let candle_symbol = format!("{}{{{}}}", symbol, period.as_str());
+        assert_eq!(candle_symbol, "AAPL{=d}");
+
+        let period = CandlePeriod::Minutes(5);
+        let candle_symbol = format!("{}{{{}}}", symbol, period.as_str());
+        assert_eq!(candle_symbol, "AAPL{=5m}");
+    }
+
+    #[test]
+    fn test_event_type_channel_ids() {
+        // Verify channel IDs are unique for each event type
+        let mut channel_ids: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for event_type in EventType::all() {
+            let channel_id = event_type.channel_id();
+            assert!(
+                channel_ids.insert(channel_id),
+                "Duplicate channel ID {} for {:?}",
+                channel_id,
+                event_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_channel_state_default() {
+        // Verify default channel state behavior
+        assert_eq!(ChannelState::Closed, ChannelState::Closed);
+        assert_ne!(ChannelState::Closed, ChannelState::Opened);
+    }
+
+    #[test]
+    fn test_dxlink_config_default() {
+        let config = DxLinkConfig::default();
+        assert_eq!(config.aggregation_period, 0.1);
+        assert_eq!(config.keepalive_interval_secs, 30);
+        assert_eq!(config.auth_timeout_secs, 10);
+        assert_eq!(config.channel_timeout_secs, 10);
+        assert_eq!(config.event_buffer_capacity, 1024);
+    }
+
+    #[test]
+    fn test_dxlink_config_low_latency() {
+        let config = DxLinkConfig::low_latency();
+        assert_eq!(config.aggregation_period, 0.0);
+        assert_eq!(config.keepalive_interval_secs, 15);
+        assert_eq!(config.event_buffer_capacity, 4096);
+    }
+
+    #[test]
+    fn test_dxlink_config_bandwidth_optimized() {
+        let config = DxLinkConfig::bandwidth_optimized();
+        assert_eq!(config.aggregation_period, 1.0);
+        assert_eq!(config.event_buffer_capacity, 512);
+    }
+
+    #[test]
+    fn test_dxlink_config_builder() {
+        let config = DxLinkConfig::new()
+            .with_aggregation_period(0.5)
+            .with_keepalive_interval_secs(20)
+            .with_event_buffer_capacity(2048);
+
+        assert_eq!(config.aggregation_period, 0.5);
+        assert_eq!(config.keepalive_interval_secs, 20);
+        assert_eq!(config.event_buffer_capacity, 2048);
+    }
+
+    #[test]
+    fn test_dxlink_config_keepalive_max() {
+        // Keepalive interval should be capped at 59 seconds
+        let config = DxLinkConfig::new().with_keepalive_interval_secs(120);
+        assert_eq!(config.keepalive_interval_secs, 59);
+    }
+
+    #[test]
+    fn test_dx_event_type_helpers() {
+        let quote = DxEvent::Quote(Quote {
+            event_symbol: "AAPL".to_string(),
+            event_time: None,
+            sequence: None,
+            time_nano_part: None,
+            bid_time: None,
+            bid_exchange_code: None,
+            bid_price: None,
+            bid_size: None,
+            ask_time: None,
+            ask_exchange_code: None,
+            ask_price: None,
+            ask_size: None,
+        });
+
+        assert!(quote.is_quote());
+        assert!(!quote.is_trade());
+        assert_eq!(quote.event_type(), EventType::Quote);
+        assert_eq!(quote.symbol(), "AAPL");
+        assert!(quote.as_quote().is_some());
+        assert!(quote.as_trade().is_none());
+    }
+
+    #[test]
+    fn test_dx_event_symbol() {
+        let trade = DxEvent::Trade(Trade {
+            event_symbol: "SPY".to_string(),
+            event_time: None,
+            event_flags: None,
+            index: None,
+            time: None,
+            time_nano_part: None,
+            sequence: None,
+            exchange_code: None,
+            price: None,
+            change: None,
+            size: None,
+            day_volume: None,
+            day_turnover: None,
+            tick_direction: None,
+            extended_trading_hours: None,
+        });
+
+        assert_eq!(trade.symbol(), "SPY");
+        assert!(trade.is_trade());
+        assert!(trade.as_trade().is_some());
     }
 }
