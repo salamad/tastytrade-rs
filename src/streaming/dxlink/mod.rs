@@ -10,6 +10,28 @@
 //! rather than JSON objects with named fields. This significantly reduces
 //! bandwidth and parsing overhead for high-frequency market data.
 //!
+//! # Automatic Quote Token Refresh
+//!
+//! TastyTrade quote tokens expire after 24 hours. By default, the streamer
+//! automatically reconnects at 23 hours to obtain a fresh token before
+//! expiration. This ensures uninterrupted market data for long-running
+//! applications without requiring manual intervention.
+//!
+//! The automatic refresh behavior can be customized or disabled via
+//! `DxLinkConfig`:
+//!
+//! ```ignore
+//! use tastytrade_rs::streaming::DxLinkConfig;
+//!
+//! // Custom refresh interval (22 hours)
+//! let config = DxLinkConfig::default()
+//!     .with_quote_token_refresh_hours(22);
+//!
+//! // Disable automatic refresh
+//! let config = DxLinkConfig::default()
+//!     .with_auto_refresh_quote_token(false);
+//! ```
+//!
 //! # Example
 //!
 //! ```ignore
@@ -32,6 +54,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::{mpsc, RwLock};
@@ -59,6 +82,16 @@ pub use events::*;
 /// to check the current connection state and `reconnect()` to manually
 /// trigger a reconnection attempt.
 ///
+/// # Automatic Quote Token Refresh
+///
+/// Quote tokens expire after 24 hours. By default, the streamer automatically
+/// reconnects at 23 hours to obtain a fresh token. This happens transparently
+/// during the `next()` call, ensuring uninterrupted market data streaming for
+/// long-running applications.
+///
+/// Monitor token age with `quote_token_obtained_at()` and check if refresh
+/// is needed with `needs_quote_token_refresh()`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -69,11 +102,11 @@ pub use events::*;
 ///
 /// streamer.subscribe::<Quote>(&["SPY", "AAPL"]).await?;
 ///
+/// // Automatic token refresh happens transparently
 /// while let Some(event) = streamer.next().await {
-///     if let Err(e) = event {
-///         if !streamer.is_connected() {
-///             streamer.reconnect().await?;
-///         }
+///     match event? {
+///         DxEvent::Quote(quote) => println!("{:?}", quote),
+///         _ => {}
 ///     }
 /// }
 /// ```
@@ -96,6 +129,10 @@ pub struct DxLinkStreamer {
     reconnect_config: ReconnectConfig,
     /// DXLink configuration
     config: DxLinkConfig,
+    /// Timestamp when the quote token was obtained (for automatic refresh)
+    quote_token_obtained_at: Arc<RwLock<DateTime<Utc>>>,
+    /// Flag indicating quote token refresh is needed
+    needs_token_refresh: Arc<AtomicBool>,
 }
 
 /// DXLink event types.
@@ -249,13 +286,21 @@ impl CandlePeriod {
 /// Configuration options for DXLink streaming.
 ///
 /// This struct provides various settings to customize the DXLink connection
-/// behavior including timeouts, aggregation periods, and buffer sizes.
+/// behavior including timeouts, aggregation periods, buffer sizes, and
+/// automatic quote token refresh.
+///
+/// # Automatic Quote Token Refresh
+///
+/// Quote tokens expire after 24 hours. By default, the streamer proactively
+/// reconnects at 23 hours to obtain a fresh token before expiration.
+/// This behavior can be disabled or customized.
 ///
 /// # Example
 /// ```ignore
 /// let config = DxLinkConfig::default()
 ///     .with_aggregation_period(0.5)  // 500ms aggregation
-///     .with_keepalive_interval_secs(20);
+///     .with_keepalive_interval_secs(20)
+///     .with_quote_token_refresh_hours(22);  // Refresh at 22 hours
 ///
 /// let streamer = client.streaming()
 ///     .dxlink_with_config(config).await?;
@@ -286,6 +331,18 @@ pub struct DxLinkConfig {
     /// Number of events to buffer before backpressure.
     /// Default: 1024
     pub event_buffer_capacity: usize,
+
+    /// Enable automatic quote token refresh.
+    /// When enabled, the streamer proactively reconnects before the
+    /// 24-hour token expiration to obtain a fresh token.
+    /// Default: true
+    pub auto_refresh_quote_token: bool,
+
+    /// Quote token refresh interval in seconds.
+    /// The streamer will reconnect after this duration to get a fresh token.
+    /// Should be less than 24 hours (86400 seconds).
+    /// Default: 82800 seconds (23 hours)
+    pub quote_token_refresh_interval_secs: u64,
 }
 
 impl Default for DxLinkConfig {
@@ -296,6 +353,8 @@ impl Default for DxLinkConfig {
             auth_timeout_secs: 10,
             channel_timeout_secs: 10,
             event_buffer_capacity: 1024,
+            auto_refresh_quote_token: true,
+            quote_token_refresh_interval_secs: 82800, // 23 hours
         }
     }
 }
@@ -343,6 +402,35 @@ impl DxLinkConfig {
         self
     }
 
+    /// Enable or disable automatic quote token refresh.
+    ///
+    /// When enabled, the streamer proactively reconnects before the 24-hour
+    /// token expiration to obtain a fresh token.
+    pub fn with_auto_refresh_quote_token(mut self, enabled: bool) -> Self {
+        self.auto_refresh_quote_token = enabled;
+        self
+    }
+
+    /// Set the quote token refresh interval in seconds.
+    ///
+    /// The streamer will reconnect after this duration to get a fresh token.
+    /// Should be less than 24 hours (86400 seconds). Values >= 86400 will be
+    /// capped at 82800 (23 hours).
+    pub fn with_quote_token_refresh_interval_secs(mut self, secs: u64) -> Self {
+        self.quote_token_refresh_interval_secs = secs.min(82800);
+        self
+    }
+
+    /// Set the quote token refresh interval in hours.
+    ///
+    /// Convenience method that converts hours to seconds. Should be less than
+    /// 24 hours. Values >= 24 will be capped at 23 hours.
+    pub fn with_quote_token_refresh_hours(mut self, hours: u64) -> Self {
+        let secs = (hours * 3600).min(82800);
+        self.quote_token_refresh_interval_secs = secs;
+        self
+    }
+
     /// Create a low-latency configuration.
     ///
     /// Optimized for real-time trading with minimal aggregation.
@@ -353,6 +441,8 @@ impl DxLinkConfig {
             auth_timeout_secs: 5,
             channel_timeout_secs: 5,
             event_buffer_capacity: 4096,
+            auto_refresh_quote_token: true,
+            quote_token_refresh_interval_secs: 82800,
         }
     }
 
@@ -366,6 +456,8 @@ impl DxLinkConfig {
             auth_timeout_secs: 15,
             channel_timeout_secs: 15,
             event_buffer_capacity: 512,
+            auto_refresh_quote_token: true,
+            quote_token_refresh_interval_secs: 82800,
         }
     }
 }
@@ -611,6 +703,8 @@ impl DxLinkStreamer {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
         let channel_states = Arc::new(RwLock::new(HashMap::new()));
         let connected = Arc::new(AtomicBool::new(true));
+        let quote_token_obtained_at = Arc::new(RwLock::new(Utc::now()));
+        let needs_token_refresh = Arc::new(AtomicBool::new(false));
 
         // Create event channel with configured capacity
         let (event_tx, event_rx) = mpsc::channel(config.event_buffer_capacity);
@@ -632,6 +726,23 @@ impl DxLinkStreamer {
             Self::keepalive_task_with_interval(keepalive_write, keepalive_connected, keepalive_interval).await;
         });
 
+        // Start quote token refresh task if enabled
+        if config.auto_refresh_quote_token {
+            let refresh_connected = connected.clone();
+            let refresh_flag = needs_token_refresh.clone();
+            let refresh_timestamp = quote_token_obtained_at.clone();
+            let refresh_interval = config.quote_token_refresh_interval_secs;
+            tokio::spawn(async move {
+                Self::quote_token_refresh_task(
+                    refresh_connected,
+                    refresh_flag,
+                    refresh_timestamp,
+                    refresh_interval,
+                )
+                .await;
+            });
+        }
+
         Ok(Self {
             write,
             event_rx,
@@ -641,6 +752,8 @@ impl DxLinkStreamer {
             client,
             reconnect_config: ReconnectConfig::default(),
             config,
+            quote_token_obtained_at,
+            needs_token_refresh,
         })
     }
 
@@ -858,8 +971,43 @@ impl DxLinkStreamer {
             .collect()
     }
 
-    /// Get the next event.
+    /// Get the next event with automatic quote token refresh.
+    ///
+    /// If automatic quote token refresh is enabled and the refresh interval
+    /// has elapsed, this method will automatically reconnect to obtain a
+    /// fresh token before returning the next event.
+    ///
+    /// # Example
+    /// ```ignore
+    /// while let Some(event) = streamer.next().await {
+    ///     match event? {
+    ///         DxEvent::Quote(quote) => println!("{:?}", quote),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
     pub async fn next(&mut self) -> Option<Result<DxEvent>> {
+        // Check if quote token refresh is needed
+        if self.config.auto_refresh_quote_token
+            && self.needs_token_refresh.load(Ordering::SeqCst)
+        {
+            tracing::info!("Performing automatic quote token refresh reconnection");
+            match self.reconnect().await {
+                Ok(()) => {
+                    tracing::info!("Automatic quote token refresh completed successfully");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "Automatic quote token refresh failed, will retry on next check"
+                    );
+                    // Don't clear the flag so it will retry
+                    // Return the error to the caller
+                    return Some(Err(e));
+                }
+            }
+        }
+
         self.event_rx.recv().await
     }
 
@@ -869,6 +1017,32 @@ impl DxLinkStreamer {
     /// Note that this is an atomic check and the state may change immediately after.
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
+    }
+
+    /// Get the timestamp when the current quote token was obtained.
+    ///
+    /// This can be used to monitor token age and determine when the next
+    /// automatic refresh will occur.
+    pub async fn quote_token_obtained_at(&self) -> DateTime<Utc> {
+        *self.quote_token_obtained_at.read().await
+    }
+
+    /// Check if quote token refresh is needed based on the configured interval.
+    ///
+    /// Returns `true` if the token age exceeds the refresh interval.
+    /// When automatic refresh is enabled, the streamer will automatically
+    /// reconnect when this condition is detected.
+    pub async fn needs_quote_token_refresh(&self) -> bool {
+        if !self.config.auto_refresh_quote_token {
+            return false;
+        }
+
+        let token_age = {
+            let timestamp = self.quote_token_obtained_at.read().await;
+            Utc::now().signed_duration_since(*timestamp)
+        };
+
+        token_age.num_seconds() >= self.config.quote_token_refresh_interval_secs as i64
     }
 
     /// Close the connection.
@@ -938,6 +1112,15 @@ impl DxLinkStreamer {
         // Get a fresh quote token
         let token = Self::get_quote_token(&self.client).await?;
 
+        // Update quote token timestamp
+        {
+            let mut timestamp = self.quote_token_obtained_at.write().await;
+            *timestamp = Utc::now();
+        }
+
+        // Clear refresh flag
+        self.needs_token_refresh.store(false, Ordering::SeqCst);
+
         // Connect to WebSocket
         let url = self.client.session.environment().await.dxlink_url();
         let (ws_stream, _) = connect_async(url).await?;
@@ -971,6 +1154,23 @@ impl DxLinkStreamer {
         tokio::spawn(async move {
             Self::keepalive_task_with_interval(keepalive_write, keepalive_connected, keepalive_interval).await;
         });
+
+        // Start new quote token refresh task if enabled
+        if self.config.auto_refresh_quote_token {
+            let refresh_connected = self.connected.clone();
+            let refresh_flag = self.needs_token_refresh.clone();
+            let refresh_timestamp = self.quote_token_obtained_at.clone();
+            let refresh_interval = self.config.quote_token_refresh_interval_secs;
+            tokio::spawn(async move {
+                Self::quote_token_refresh_task(
+                    refresh_connected,
+                    refresh_flag,
+                    refresh_timestamp,
+                    refresh_interval,
+                )
+                .await;
+            });
+        }
 
         // Re-subscribe to all symbols, grouped by event type
         // This will automatically re-open channels via ensure_channel_open
@@ -1197,6 +1397,48 @@ impl DxLinkStreamer {
             if w.send(Message::Text(msg.to_string())).await.is_err() {
                 connected.store(false, Ordering::SeqCst);
                 return;
+            }
+        }
+    }
+
+    /// Background task that monitors quote token age and signals when refresh is needed.
+    ///
+    /// Quote tokens expire after 24 hours. This task checks the token age periodically
+    /// and sets the `needs_token_refresh` flag when the configured refresh interval
+    /// has elapsed, triggering automatic reconnection to obtain a fresh token.
+    async fn quote_token_refresh_task(
+        connected: Arc<AtomicBool>,
+        needs_refresh: Arc<AtomicBool>,
+        token_timestamp: Arc<RwLock<DateTime<Utc>>>,
+        refresh_interval_secs: u64,
+    ) {
+        // Check every hour if refresh is needed
+        let check_interval = Duration::from_secs(3600); // 1 hour
+        let mut interval = tokio::time::interval(check_interval);
+
+        loop {
+            interval.tick().await;
+
+            // Stop if disconnected
+            if !connected.load(Ordering::SeqCst) {
+                return;
+            }
+
+            // Check if token age exceeds refresh interval
+            let token_age = {
+                let timestamp = token_timestamp.read().await;
+                Utc::now().signed_duration_since(*timestamp)
+            };
+
+            if token_age.num_seconds() >= refresh_interval_secs as i64 {
+                tracing::info!(
+                    token_age_hours = token_age.num_hours(),
+                    refresh_interval_hours = refresh_interval_secs / 3600,
+                    "Quote token refresh interval reached, triggering automatic reconnection"
+                );
+                needs_refresh.store(true, Ordering::SeqCst);
+                // Sleep briefly to avoid busy loop if reconnection fails
+                tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
     }
@@ -1501,6 +1743,8 @@ mod tests {
         assert_eq!(config.auth_timeout_secs, 10);
         assert_eq!(config.channel_timeout_secs, 10);
         assert_eq!(config.event_buffer_capacity, 1024);
+        assert_eq!(config.auto_refresh_quote_token, true);
+        assert_eq!(config.quote_token_refresh_interval_secs, 82800); // 23 hours
     }
 
     #[test]
@@ -1535,6 +1779,70 @@ mod tests {
         // Keepalive interval should be capped at 59 seconds
         let config = DxLinkConfig::new().with_keepalive_interval_secs(120);
         assert_eq!(config.keepalive_interval_secs, 59);
+    }
+
+    #[test]
+    fn test_dxlink_config_auto_refresh_enabled() {
+        let config = DxLinkConfig::new().with_auto_refresh_quote_token(true);
+        assert_eq!(config.auto_refresh_quote_token, true);
+    }
+
+    #[test]
+    fn test_dxlink_config_auto_refresh_disabled() {
+        let config = DxLinkConfig::new().with_auto_refresh_quote_token(false);
+        assert_eq!(config.auto_refresh_quote_token, false);
+    }
+
+    #[test]
+    fn test_dxlink_config_refresh_interval_secs() {
+        let config = DxLinkConfig::new().with_quote_token_refresh_interval_secs(3600);
+        assert_eq!(config.quote_token_refresh_interval_secs, 3600);
+    }
+
+    #[test]
+    fn test_dxlink_config_refresh_interval_secs_max() {
+        // Refresh interval should be capped at 82800 seconds (23 hours)
+        let config = DxLinkConfig::new().with_quote_token_refresh_interval_secs(100000);
+        assert_eq!(config.quote_token_refresh_interval_secs, 82800);
+    }
+
+    #[test]
+    fn test_dxlink_config_refresh_interval_hours() {
+        let config = DxLinkConfig::new().with_quote_token_refresh_hours(20);
+        assert_eq!(config.quote_token_refresh_interval_secs, 72000); // 20 * 3600
+    }
+
+    #[test]
+    fn test_dxlink_config_refresh_interval_hours_max() {
+        // Refresh interval should be capped at 23 hours when using hours
+        let config = DxLinkConfig::new().with_quote_token_refresh_hours(25);
+        assert_eq!(config.quote_token_refresh_interval_secs, 82800); // 23 hours max
+    }
+
+    #[test]
+    fn test_dxlink_config_builder_with_refresh_options() {
+        let config = DxLinkConfig::new()
+            .with_aggregation_period(0.5)
+            .with_auto_refresh_quote_token(false)
+            .with_quote_token_refresh_hours(22);
+
+        assert_eq!(config.aggregation_period, 0.5);
+        assert_eq!(config.auto_refresh_quote_token, false);
+        assert_eq!(config.quote_token_refresh_interval_secs, 79200); // 22 hours
+    }
+
+    #[test]
+    fn test_dxlink_config_low_latency_has_auto_refresh() {
+        let config = DxLinkConfig::low_latency();
+        assert_eq!(config.auto_refresh_quote_token, true);
+        assert_eq!(config.quote_token_refresh_interval_secs, 82800);
+    }
+
+    #[test]
+    fn test_dxlink_config_bandwidth_optimized_has_auto_refresh() {
+        let config = DxLinkConfig::bandwidth_optimized();
+        assert_eq!(config.auto_refresh_quote_token, true);
+        assert_eq!(config.quote_token_refresh_interval_secs, 82800);
     }
 
     #[test]

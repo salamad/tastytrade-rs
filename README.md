@@ -10,7 +10,7 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 
 - **Full API Coverage**: Accounts, orders, positions, balances, transactions, instruments, market data, watchlists
 - **Real-time Streaming**: DXLink for market data (quotes, trades, greeks) and Account Streamer for order/position/balance notifications
-- **DXLink Enhancements**: COMPACT protocol format, multi-channel architecture, proper handshake verification, proactive keepalive, reconnection support, configurable settings, typed event filtering
+- **DXLink Enhancements**: COMPACT protocol format, multi-channel architecture, proper handshake verification, proactive keepalive, **automatic quote token refresh** (24-hour expiration handled transparently), reconnection support, configurable settings, typed event filtering
 - **Account Streamer Enhancements**: Auto-reconnection with configurable backoff (enabled by default), connection state tracking, subscription inspection, typed order status helpers, parse error propagation, unknown event monitoring
 - **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
@@ -361,11 +361,46 @@ let bandwidth_opt = DxLinkConfig::bandwidth_optimized(); // Reduce bandwidth
 let config = DxLinkConfig::new()
     .with_aggregation_period(0.0)        // No aggregation (real-time)
     .with_keepalive_interval_secs(20)    // More frequent keepalives
-    .with_event_buffer_capacity(4096);   // Larger buffer
+    .with_event_buffer_capacity(4096)    // Larger buffer
+    .with_quote_token_refresh_hours(22); // Refresh token at 22 hours
+
+// Disable automatic quote token refresh (not recommended for long-running apps)
+let manual_config = DxLinkConfig::new()
+    .with_auto_refresh_quote_token(false);
 
 // Use custom config
 let streamer = client.streaming().dxlink_with_config(config).await?;
 ```
+
+#### Automatic Quote Token Refresh
+
+Quote tokens expire after 24 hours. By default, the streamer **automatically reconnects at 23 hours** to obtain a fresh token, ensuring uninterrupted streaming for long-running applications:
+
+```rust
+// Default behavior - automatic refresh at 23 hours (enabled by default)
+let mut streamer = client.streaming().dxlink().await?;
+
+// Customize refresh interval (e.g., 22 hours)
+let config = DxLinkConfig::default().with_quote_token_refresh_hours(22);
+let mut streamer = client.streaming().dxlink_with_config(config).await?;
+
+// Monitor token age
+let obtained_at = streamer.quote_token_obtained_at().await;
+println!("Token obtained: {}", obtained_at);
+
+// Check if refresh is needed
+if streamer.needs_quote_token_refresh().await {
+    println!("Token refresh will occur soon");
+}
+
+// Automatic refresh happens transparently during next()
+while let Some(event) = streamer.next().await {
+    // Token is automatically refreshed when needed
+    // No manual intervention required
+}
+```
+
+For long-running applications (>24 hours), automatic refresh is **strongly recommended** and enabled by default. Manual refresh can be triggered with `streamer.reconnect().await?`.
 
 #### Candle Subscriptions
 
