@@ -241,7 +241,16 @@ impl ClientInner {
 
         let response = self.http.get(&url).headers(headers).send().await?;
 
-        self.handle_response(response).await
+        match self.handle_response(response).await {
+            Err(Error::SessionExpired) if self.config.auto_refresh_session => {
+                // Token expired between check and request; refresh and retry once
+                self.session.refresh().await?;
+                let headers = self.build_headers().await?;
+                let response = self.http.get(&url).headers(headers).send().await?;
+                self.handle_response(response).await
+            }
+            result => result,
+        }
     }
 
     /// Make a GET request with query parameters.
@@ -263,7 +272,22 @@ impl ClientInner {
             .send()
             .await?;
 
-        self.handle_response(response).await
+        match self.handle_response(response).await {
+            Err(Error::SessionExpired) if self.config.auto_refresh_session => {
+                // Token expired between check and request; refresh and retry once
+                self.session.refresh().await?;
+                let headers = self.build_headers().await?;
+                let response = self
+                    .http
+                    .get(&url)
+                    .headers(headers)
+                    .query(query)
+                    .send()
+                    .await?;
+                self.handle_response(response).await
+            }
+            result => result,
+        }
     }
 
     /// Make a POST request.
@@ -285,7 +309,22 @@ impl ClientInner {
             .send()
             .await?;
 
-        self.handle_response(response).await
+        match self.handle_response(response).await {
+            Err(Error::SessionExpired) if self.config.auto_refresh_session => {
+                // Token expired between check and request; refresh and retry once
+                self.session.refresh().await?;
+                let headers = self.build_headers().await?;
+                let response = self
+                    .http
+                    .post(&url)
+                    .headers(headers)
+                    .json(body)
+                    .send()
+                    .await?;
+                self.handle_response(response).await
+            }
+            result => result,
+        }
     }
 
     /// Make a PUT request.
@@ -307,7 +346,22 @@ impl ClientInner {
             .send()
             .await?;
 
-        self.handle_response(response).await
+        match self.handle_response(response).await {
+            Err(Error::SessionExpired) if self.config.auto_refresh_session => {
+                // Token expired between check and request; refresh and retry once
+                self.session.refresh().await?;
+                let headers = self.build_headers().await?;
+                let response = self
+                    .http
+                    .put(&url)
+                    .headers(headers)
+                    .json(body)
+                    .send()
+                    .await?;
+                self.handle_response(response).await
+            }
+            result => result,
+        }
     }
 
     /// Make a DELETE request.
@@ -319,7 +373,16 @@ impl ClientInner {
 
         let response = self.http.delete(&url).headers(headers).send().await?;
 
-        self.handle_response(response).await
+        match self.handle_response(response).await {
+            Err(Error::SessionExpired) if self.config.auto_refresh_session => {
+                // Token expired between check and request; refresh and retry once
+                self.session.refresh().await?;
+                let headers = self.build_headers().await?;
+                let response = self.http.delete(&url).headers(headers).send().await?;
+                self.handle_response(response).await
+            }
+            result => result,
+        }
     }
 
     /// Handle an API response.

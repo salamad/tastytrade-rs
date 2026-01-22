@@ -15,7 +15,7 @@ A production-grade Rust client for the [TastyTrade](https://tastyworks.com) brok
 - **Paginated Streaming**: Lazy iterators for memory-efficient pagination over large result sets
 - **Type Safety**: Strongly-typed models with newtypes for compile-time guarantees
 - **Async-first**: Built on Tokio for high-performance async I/O
-- **Authentication**: OAuth2 and legacy session-based authentication with automatic token refresh
+- **Authentication**: OAuth2 and legacy session-based authentication with automatic token refresh and retry on 401
 - **Order Builder**: Fluent API with comprehensive client-side validation (quantity, price, symbol validation)
 - **Production Ready**: Comprehensive error handling, retry logic, connection management, and structured logging via `tracing`
 
@@ -1018,7 +1018,7 @@ async fn main() -> tastytrade_rs::Result<()> {
 
 | Module | Endpoints | Status |
 |--------|-----------|--------|
-| Authentication | Login, OAuth, Token Refresh | Complete |
+| Authentication | Login, OAuth, Token Refresh, Auto-Retry | Complete |
 | Accounts | List, Get, Search | Complete |
 | Balances | Get, Snapshots, History | Complete |
 | Positions | List, Get | Complete |
