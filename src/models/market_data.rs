@@ -354,8 +354,9 @@ pub struct MarketMetric {
     /// Market cap
     #[serde(default)]
     pub market_cap: Option<Decimal>,
-    /// Earnings date
-    #[serde(default)]
+    /// Expected earnings report date from TastyTrade API
+    /// Note: The API field is "expected-report-date", not "earnings-date"
+    #[serde(default, rename = "expected-report-date")]
     pub earnings_date: Option<String>,
     /// Days until earnings
     #[serde(default)]
