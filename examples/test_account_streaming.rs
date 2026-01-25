@@ -164,6 +164,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         AccountNotification::Unknown(val) => {
                             println!("   Received: Unknown notification: {:?}", val);
                         }
+                        AccountNotification::ParseError { action, error, raw_data } => {
+                            println!("   Received: ParseError");
+                            println!("     action: {}", action);
+                            println!("     error: {}", error);
+                            println!("     raw_data: {:?}", raw_data);
+                        }
                     }
 
                     // Stop after receiving both heartbeat and subscription confirmation

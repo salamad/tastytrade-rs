@@ -259,6 +259,9 @@ impl AccountStreamer {
             subs.iter().cloned().collect()
         };
 
+        // Ensure session is valid (refresh if expired)
+        self.client.session.ensure_valid().await?;
+
         // Get fresh session token (used directly without Bearer prefix for session login)
         let session_token = self.client.session.session_token().await;
         {
@@ -789,6 +792,20 @@ impl AccountStreamer {
                     })
                     .unwrap_or_default();
                 Ok(AccountNotification::SubscriptionConfirmation { accounts })
+            }
+            // Handle "connect" action with status "error" as connection failure
+            "connect" if status == "error" => {
+                let message = json.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                tracing::error!(
+                    message = message,
+                    raw_json = %json,
+                    "Account subscription failed - session may be expired or account unavailable"
+                );
+                Ok(AccountNotification::ConnectionWarning {
+                    message: format!("Subscription failed: {}", message),
+                })
             }
             "subscription-confirmation" => {
                 let accounts = json.get("value")
