@@ -128,6 +128,33 @@ where
 ///     .build()
 ///     .unwrap();
 /// ```
+/// Advanced instructions for order behavior
+///
+/// These instructions control special handling of orders by the broker.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AdvancedInstructions {
+    /// When true, the broker will reject close orders that don't have matching positions.
+    /// Without this, TastyTrade will automatically convert close orders to open orders
+    /// if no matching position exists (e.g., BuyToClose becomes BuyToOpen).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict_position_effect_validation: Option<bool>,
+}
+
+impl AdvancedInstructions {
+    /// Create new advanced instructions with strict position effect validation enabled.
+    pub fn strict() -> Self {
+        Self {
+            strict_position_effect_validation: Some(true),
+        }
+    }
+
+    /// Check if any instructions are set (for skip_serializing_if)
+    pub fn is_empty(&self) -> bool {
+        self.strict_position_effect_validation.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct NewOrder {
@@ -153,6 +180,9 @@ pub struct NewOrder {
     /// Effect of notional value
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_effect: Option<PriceEffect>,
+    /// Advanced instructions for special order handling
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advanced_instructions: Option<AdvancedInstructions>,
     /// Order legs (instruments to trade)
     pub legs: Vec<OrderLeg>,
     /// Order rules for conditional orders
@@ -174,6 +204,7 @@ pub struct NewOrderBuilder {
     gtc_date: Option<NaiveDate>,
     value: Option<Decimal>,
     value_effect: Option<PriceEffect>,
+    advanced_instructions: Option<AdvancedInstructions>,
     legs: Vec<OrderLeg>,
     rules: Option<OrderRules>,
     external_identifier: Option<String>,
@@ -273,6 +304,29 @@ impl NewOrderBuilder {
     /// Set an external identifier for idempotency.
     pub fn external_identifier(mut self, id: impl Into<String>) -> Self {
         self.external_identifier = Some(id.into());
+        self
+    }
+
+    /// Set advanced instructions for special order handling.
+    pub fn advanced_instructions(mut self, instructions: AdvancedInstructions) -> Self {
+        self.advanced_instructions = Some(instructions);
+        self
+    }
+
+    /// Enable strict position effect validation.
+    ///
+    /// When enabled, the broker will reject close orders (BuyToClose, SellToClose)
+    /// if there is no matching position to close. Without this, TastyTrade automatically
+    /// converts close orders to open orders if no position exists.
+    ///
+    /// This is recommended for safety to prevent accidental position opens when
+    /// intending to close.
+    pub fn strict_position_effect_validation(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.advanced_instructions = Some(AdvancedInstructions::strict());
+        } else {
+            self.advanced_instructions = None;
+        }
         self
     }
 
@@ -423,6 +477,7 @@ impl NewOrderBuilder {
             gtc_date: self.gtc_date,
             value: self.value,
             value_effect: self.value_effect,
+            advanced_instructions: self.advanced_instructions,
             legs: self.legs,
             rules: self.rules,
             external_identifier: self.external_identifier,
