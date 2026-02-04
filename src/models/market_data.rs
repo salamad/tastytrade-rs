@@ -288,6 +288,41 @@ impl DetailedQuote {
     }
 }
 
+/// Earnings report information from TastyTrade API.
+///
+/// Contains details about upcoming or recent earnings announcements.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Earnings {
+    /// Whether earnings info is visible/available
+    #[serde(default)]
+    pub visible: Option<bool>,
+    /// Expected earnings report date (format: "YYYY-MM-DD")
+    #[serde(default)]
+    pub expected_report_date: Option<String>,
+    /// Whether the date is estimated vs confirmed
+    #[serde(default)]
+    pub estimated: Option<bool>,
+    /// Time of day for earnings release (e.g., "AMC" = after market close, "BMO" = before market open)
+    #[serde(default)]
+    pub time_of_day: Option<String>,
+    /// Late flag indicator
+    #[serde(default)]
+    pub late_flag: Option<i32>,
+    /// Quarter end date
+    #[serde(default)]
+    pub quarter_end_date: Option<String>,
+    /// Actual earnings per share (available after report)
+    #[serde(default)]
+    pub actual_eps: Option<String>,
+    /// Consensus EPS estimate
+    #[serde(default)]
+    pub consensus_estimate: Option<String>,
+    /// When the earnings info was last updated
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
 /// Implied volatility for a specific option expiration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -354,13 +389,10 @@ pub struct MarketMetric {
     /// Market cap
     #[serde(default)]
     pub market_cap: Option<Decimal>,
-    /// Expected earnings report date from TastyTrade API
-    /// Note: The API field is "expected-report-date", not "earnings-date"
-    #[serde(default, rename = "expected-report-date")]
-    pub earnings_date: Option<String>,
-    /// Days until earnings
+    /// Earnings information (nested object from API)
+    /// Contains expected-report-date and other earnings details
     #[serde(default)]
-    pub days_until_earnings: Option<i32>,
+    pub earnings: Option<Earnings>,
     /// Expected move based on implied volatility
     #[serde(default)]
     pub expected_move: Option<Decimal>,
