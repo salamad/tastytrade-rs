@@ -1061,7 +1061,7 @@ mod metrics_tests {
                 tracing::info!(
                     "AAPL metrics - IV Rank: {:?}, Earnings: {:?}",
                     m.implied_volatility_index_rank,
-                    m.earnings_date
+                    m.earnings
                 );
             }
             Err(tastytrade_rs::Error::NotFound(_)) => {

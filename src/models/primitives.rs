@@ -239,7 +239,7 @@ impl ApiVersion {
         let month: u32 = version[4..6].parse().unwrap();
         let day: u32 = version[6..8].parse().unwrap();
 
-        if year < 2020 || year > 2100 {
+        if !(2020..=2100).contains(&year) {
             return Err(crate::Error::InvalidInput(format!(
                 "Invalid year in API version: {}",
                 year

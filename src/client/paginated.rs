@@ -239,6 +239,7 @@ impl<T: DeserializeOwned + Unpin + Send + 'static> PaginatedStreamBuilder<T> {
     }
 
     /// Build the stream without additional query parameters.
+    #[allow(dead_code)]
     pub fn build(self) -> PaginatedStream<T> {
         self.build_with_query::<()>(None)
     }

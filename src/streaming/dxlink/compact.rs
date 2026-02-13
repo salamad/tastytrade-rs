@@ -623,6 +623,7 @@ pub fn get_accept_event_fields() -> serde_json::Value {
 }
 
 /// Get the event type enum from a string.
+#[allow(dead_code)]
 pub fn event_type_from_str(s: &str) -> Option<EventType> {
     match s {
         "Quote" => Some(EventType::Quote),

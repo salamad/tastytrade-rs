@@ -558,7 +558,7 @@ impl AccountStreamer {
     pub async fn subscribed_accounts(&self) -> Vec<AccountNumber> {
         let subs = self.subscriptions.read().await;
         subs.iter()
-            .map(|s| AccountNumber::new(s))
+            .map(AccountNumber::new)
             .collect()
     }
 
@@ -601,7 +601,7 @@ impl AccountStreamer {
     pub fn try_subscribed_accounts(&self) -> Option<Vec<AccountNumber>> {
         self.subscriptions.try_read().ok().map(|subs| {
             subs.iter()
-                .map(|s| AccountNumber::new(s))
+                .map(AccountNumber::new)
                 .collect()
         })
     }
@@ -859,7 +859,7 @@ impl AccountStreamer {
             "balance" => {
                 let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
                 match serde_json::from_value::<BalanceNotification>(data.clone()) {
-                    Ok(balance) => Ok(AccountNotification::Balance(balance)),
+                    Ok(balance) => Ok(AccountNotification::Balance(Box::new(balance))),
                     Err(e) => {
                         tracing::error!(
                             action = "balance",

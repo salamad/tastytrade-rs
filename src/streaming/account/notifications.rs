@@ -22,7 +22,7 @@ pub enum AccountNotification {
     /// Position update
     Position(PositionNotification),
     /// Balance update
-    Balance(BalanceNotification),
+    Balance(Box<BalanceNotification>),
     /// Quote alert triggered
     QuoteAlert(QuoteAlertNotification),
 
@@ -965,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_balance_is_not_connection_event() {
-        let event = AccountNotification::Balance(BalanceNotification::default());
+        let event = AccountNotification::Balance(Box::new(BalanceNotification::default()));
         assert!(!event.is_connection_event());
     }
 
@@ -989,7 +989,7 @@ mod tests {
 
     #[test]
     fn test_is_balance() {
-        let balance_event = AccountNotification::Balance(BalanceNotification::default());
+        let balance_event = AccountNotification::Balance(Box::new(BalanceNotification::default()));
         assert!(balance_event.is_balance());
 
         let order_event = AccountNotification::Order(OrderNotification::default());
@@ -1095,7 +1095,7 @@ mod tests {
         assert!(!AccountNotification::Heartbeat.is_error_condition());
         assert!(!AccountNotification::Order(OrderNotification::default()).is_error_condition());
         assert!(!AccountNotification::Position(PositionNotification::default()).is_error_condition());
-        assert!(!AccountNotification::Balance(BalanceNotification::default()).is_error_condition());
+        assert!(!AccountNotification::Balance(Box::new(BalanceNotification::default())).is_error_condition());
         assert!(!AccountNotification::Reconnected { accounts_restored: 1 }.is_error_condition());
     }
 

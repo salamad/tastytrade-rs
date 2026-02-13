@@ -450,6 +450,7 @@ pub(crate) struct ApiResponse<T> {
 /// Pagination information for list responses.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
 pub struct Pagination {
     /// Items per page
     pub per_page: i32,

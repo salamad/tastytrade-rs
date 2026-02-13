@@ -155,6 +155,7 @@ impl AdvancedInstructions {
     }
 }
 
+/// A new order to be placed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct NewOrder {
@@ -709,7 +710,7 @@ impl Order {
     /// Get the order ID as a strongly-typed value.
     /// Returns `None` for dry run orders that don't have an ID.
     pub fn order_id(&self) -> Option<super::OrderId> {
-        self.id.as_ref().map(|id| super::OrderId::new(id))
+        self.id.as_ref().map(super::OrderId::new)
     }
 
     /// Returns `true` if the order can be cancelled.

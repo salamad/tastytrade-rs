@@ -60,7 +60,7 @@ impl BalancesService {
         &self,
         account_number: &AccountNumber,
         start_date: Option<NaiveDate>,
-        end_date: Option<NaiveDate>,
+        _end_date: Option<NaiveDate>,
     ) -> Result<Vec<BalanceSnapshot>> {
         #[derive(Serialize)]
         #[serde(rename_all = "kebab-case")]
