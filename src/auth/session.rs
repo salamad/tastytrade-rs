@@ -282,6 +282,14 @@ impl Session {
             .map(|t| t.expose_secret().to_string())
     }
 
+    /// Check if this session was created with OAuth2 credentials.
+    ///
+    /// OAuth2 sessions require "Bearer " prefix in Authorization header.
+    pub async fn is_oauth2(&self) -> bool {
+        let inner = self.inner.read().await;
+        inner.client_secret.is_some() && inner.refresh_token.is_some()
+    }
+
     /// Destroy the session (logout).
     pub async fn destroy(&self) -> Result<()> {
         let inner = self.inner.read().await;

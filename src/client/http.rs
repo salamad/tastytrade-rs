@@ -212,9 +212,15 @@ impl ClientInner {
         let mut headers = HeaderMap::new();
 
         let token = self.session.access_token().await;
+        // OAuth2 sessions require "Bearer " prefix, legacy sessions use raw token
+        let auth_value = if self.session.is_oauth2().await {
+            format!("Bearer {}", token.expose_secret())
+        } else {
+            token.expose_secret().to_string()
+        };
         headers.insert(
             AUTHORIZATION,
-            HeaderValue::from_str(token.expose_secret())
+            HeaderValue::from_str(&auth_value)
                 .map_err(|_| Error::InvalidInput("Invalid token format".to_string()))?,
         );
 
