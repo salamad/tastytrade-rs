@@ -2,9 +2,40 @@
 
 use chrono::{DateTime, NaiveDate, Utc};
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::enums::{InstrumentType, PriceEffect, QuantityDirection};
+
+/// Deserialize a multiplier that may arrive as an integer (`100`) or a string (`"100.0"`).
+fn deserialize_optional_multiplier<'de, D>(deserializer: D) -> Result<Option<i32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MultiplierValue {
+        Int(i32),
+        Float(f64),
+        String(String),
+        Null,
+    }
+
+    match MultiplierValue::deserialize(deserializer)? {
+        MultiplierValue::Int(i) => Ok(Some(i)),
+        MultiplierValue::Float(f) => Ok(Some(f as i32)),
+        MultiplierValue::String(s) => {
+            if s.is_empty() {
+                return Ok(None);
+            }
+            s.parse::<f64>()
+                .map(|f| Some(f as i32))
+                .map_err(|_| D::Error::custom(format!("invalid multiplier string: {s}")))
+        }
+        MultiplierValue::Null => Ok(None),
+    }
+}
 
 /// Account balance information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -188,7 +219,7 @@ pub struct Position {
     #[serde(default)]
     pub average_daily_market_close_price: Option<Decimal>,
     /// Contract multiplier (100 for standard options)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_multiplier")]
     pub multiplier: Option<i32>,
     /// Effect on cost (debit/credit)
     #[serde(default)]
@@ -438,6 +469,24 @@ mod tests {
         let pos: Position =
             serde_json::from_str(json).expect("should deserialize short position");
         assert_eq!(pos.quantity_direction, QuantityDirection::Short);
+    }
+
+    #[test]
+    fn test_position_string_multiplier() {
+        let json = r#"{
+            "account-number": "5WV12345",
+            "symbol": "AAPL  240119C00150000",
+            "instrument-type": "Equity Option",
+            "underlying-symbol": "AAPL",
+            "quantity": "10",
+            "quantity-direction": "Long",
+            "multiplier": "100.0",
+            "is-suppressed": false
+        }"#;
+
+        let pos: Position = serde_json::from_str(json)
+            .expect("should deserialize position with string multiplier");
+        assert_eq!(pos.multiplier, Some(100));
     }
 
     #[test]
