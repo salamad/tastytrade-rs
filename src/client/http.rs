@@ -399,7 +399,15 @@ impl ClientInner {
         let status = response.status();
 
         if status.is_success() {
-            let api_response: ApiResponse<T> = response.json().await?;
+            let body = response.text().await?;
+            let api_response: ApiResponse<T> = serde_json::from_str(&body).map_err(|e| {
+                tracing::error!(
+                    error = %e,
+                    body_preview = &body[..body.len().min(500)],
+                    "Failed to deserialize API response"
+                );
+                Error::Json(e)
+            })?;
             Ok(api_response.data)
         } else {
             let status_code = status.as_u16();

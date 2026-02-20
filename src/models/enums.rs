@@ -200,6 +200,9 @@ pub enum PriceEffect {
     Debit,
     /// No effect
     None,
+    /// Unknown effect (forward-compatibility)
+    #[serde(other)]
+    Unknown,
 }
 
 /// Direction of a position quantity.
@@ -209,6 +212,11 @@ pub enum QuantityDirection {
     Long,
     /// Short position
     Short,
+    /// Zero quantity (fully closed/assigned positions)
+    Zero,
+    /// Unknown direction (forward-compatibility)
+    #[serde(other)]
+    Unknown,
 }
 
 /// Account margin type.

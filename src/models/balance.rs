@@ -199,6 +199,12 @@ pub struct Position {
     /// Whether this position is suppressed
     #[serde(default)]
     pub is_suppressed: bool,
+    /// Whether this position is frozen (admin action; not tradeable)
+    #[serde(default)]
+    pub is_frozen: bool,
+    /// Quantity unable to be traded or modified
+    #[serde(default)]
+    pub restricted_quantity: Option<Decimal>,
     /// Realized day gain/loss
     #[serde(default)]
     pub realized_day_gain: Option<Decimal>,
@@ -250,6 +256,7 @@ impl Position {
                 match self.quantity_direction {
                     QuantityDirection::Long => Some(pnl),
                     QuantityDirection::Short => Some(-pnl),
+                    QuantityDirection::Zero | QuantityDirection::Unknown => Some(Decimal::ZERO),
                 }
             }
             _ => None,
@@ -289,6 +296,8 @@ mod tests {
             cost_effect: None,
             is_closing_only: false,
             is_suppressed: false,
+            is_frozen: false,
+            restricted_quantity: None,
             realized_day_gain: None,
             realized_day_gain_effect: None,
             realized_day_gain_date: None,
@@ -321,6 +330,8 @@ mod tests {
             cost_effect: None,
             is_closing_only: false,
             is_suppressed: false,
+            is_frozen: false,
+            restricted_quantity: None,
             realized_day_gain: None,
             realized_day_gain_effect: None,
             realized_day_gain_date: None,
@@ -336,5 +347,194 @@ mod tests {
         assert_eq!(pos.market_value(), Some(dec!(5500.00)));
         // (5.50 - 3.00) * 10 * 100 = $2,500 profit
         assert_eq!(pos.unrealized_pnl(), Some(dec!(2500.00)));
+    }
+
+    #[test]
+    fn test_position_deserialization_from_api_json() {
+        let json = r#"{
+            "account-number": "5WV12345",
+            "symbol": "AAPL",
+            "instrument-type": "Equity",
+            "underlying-symbol": "AAPL",
+            "quantity": "100",
+            "quantity-direction": "Long",
+            "close-price": "282.48",
+            "average-open-price": "288.7",
+            "average-yearly-market-close-price": "123.18",
+            "average-daily-market-close-price": "282.48",
+            "multiplier": 1,
+            "cost-effect": "Credit",
+            "is-suppressed": false,
+            "is-frozen": false,
+            "restricted-quantity": "0.0",
+            "realized-day-gain": "0.0",
+            "realized-day-gain-effect": "None",
+            "realized-day-gain-date": "2022-11-01",
+            "realized-today": "0.0",
+            "realized-today-effect": "None",
+            "realized-today-date": "2022-11-01",
+            "created-at": "2022-08-22T17:56:51.872+00:00",
+            "updated-at": "2022-11-01T21:49:54.095+00:00"
+        }"#;
+
+        let pos: Position =
+            serde_json::from_str(json).expect("should deserialize full API response");
+        assert_eq!(pos.account_number, "5WV12345");
+        assert_eq!(pos.symbol, "AAPL");
+        assert_eq!(pos.quantity, dec!(100));
+        assert_eq!(pos.quantity_direction, QuantityDirection::Long);
+        assert_eq!(pos.instrument_type, InstrumentType::Equity);
+        assert!(!pos.is_frozen);
+        assert_eq!(pos.restricted_quantity, Some(dec!(0.0)));
+    }
+
+    #[test]
+    fn test_position_quantity_direction_zero() {
+        let json = r#"{
+            "account-number": "5WV12345",
+            "symbol": "AAPL  240119C00150000",
+            "instrument-type": "Equity Option",
+            "underlying-symbol": "AAPL",
+            "quantity": "0",
+            "quantity-direction": "Zero",
+            "close-price": "0.0",
+            "average-open-price": "3.00",
+            "multiplier": 100,
+            "cost-effect": "Debit",
+            "is-suppressed": false,
+            "is-frozen": false,
+            "restricted-quantity": "0.0",
+            "realized-day-gain": "150.0",
+            "realized-day-gain-effect": "Credit",
+            "realized-day-gain-date": "2024-01-19",
+            "realized-today": "150.0",
+            "realized-today-effect": "Credit",
+            "realized-today-date": "2024-01-19",
+            "expires-at": "2024-01-19T21:00:00.000+00:00",
+            "created-at": "2023-12-01T14:30:00.000+00:00",
+            "updated-at": "2024-01-19T21:00:00.000+00:00"
+        }"#;
+
+        let pos: Position = serde_json::from_str(json)
+            .expect("should deserialize position with Zero quantity-direction");
+        assert_eq!(pos.quantity_direction, QuantityDirection::Zero);
+        assert_eq!(pos.quantity, dec!(0));
+    }
+
+    #[test]
+    fn test_position_quantity_direction_short() {
+        let json = r#"{
+            "account-number": "5WV12345",
+            "symbol": "AAPL  240119P00140000",
+            "instrument-type": "Equity Option",
+            "underlying-symbol": "AAPL",
+            "quantity": "5",
+            "quantity-direction": "Short",
+            "multiplier": 100,
+            "cost-effect": "Credit",
+            "is-suppressed": false
+        }"#;
+
+        let pos: Position =
+            serde_json::from_str(json).expect("should deserialize short position");
+        assert_eq!(pos.quantity_direction, QuantityDirection::Short);
+    }
+
+    #[test]
+    fn test_position_ignores_unknown_fields() {
+        let json = r#"{
+            "account-number": "5WV12345",
+            "symbol": "AAPL",
+            "instrument-type": "Equity",
+            "quantity": "100",
+            "quantity-direction": "Long",
+            "is-suppressed": false,
+            "some-future-field": "some-value",
+            "another-new-field": 42
+        }"#;
+
+        let pos: Position =
+            serde_json::from_str(json).expect("should ignore unknown fields");
+        assert_eq!(pos.symbol, "AAPL");
+    }
+
+    #[test]
+    fn test_positions_api_envelope() {
+        #[derive(serde::Deserialize)]
+        struct ApiResp<T> {
+            data: T,
+        }
+        #[derive(serde::Deserialize)]
+        struct ItemsResponse {
+            items: Vec<Position>,
+        }
+
+        let json = r#"{
+            "data": {
+                "items": [
+                    {
+                        "account-number": "5WV12345",
+                        "symbol": "AAPL",
+                        "instrument-type": "Equity",
+                        "quantity": "100",
+                        "quantity-direction": "Long",
+                        "is-suppressed": false
+                    },
+                    {
+                        "account-number": "5WV12345",
+                        "symbol": "MSFT  240119C00300000",
+                        "instrument-type": "Equity Option",
+                        "underlying-symbol": "MSFT",
+                        "quantity": "0",
+                        "quantity-direction": "Zero",
+                        "multiplier": 100,
+                        "is-suppressed": false,
+                        "is-frozen": false,
+                        "restricted-quantity": "0.0"
+                    }
+                ]
+            },
+            "context": "/accounts/5WV12345/positions"
+        }"#;
+
+        let resp: ApiResp<ItemsResponse> = serde_json::from_str(json)
+            .expect("should deserialize full API envelope with mixed positions");
+        assert_eq!(resp.data.items.len(), 2);
+        assert_eq!(
+            resp.data.items[0].quantity_direction,
+            QuantityDirection::Long
+        );
+        assert_eq!(
+            resp.data.items[1].quantity_direction,
+            QuantityDirection::Zero
+        );
+    }
+
+    #[test]
+    fn test_price_effect_variants() {
+        assert_eq!(
+            serde_json::from_str::<PriceEffect>(r#""Credit""#).unwrap(),
+            PriceEffect::Credit
+        );
+        assert_eq!(
+            serde_json::from_str::<PriceEffect>(r#""Debit""#).unwrap(),
+            PriceEffect::Debit
+        );
+        assert_eq!(
+            serde_json::from_str::<PriceEffect>(r#""None""#).unwrap(),
+            PriceEffect::None
+        );
+    }
+
+    #[test]
+    fn test_quantity_direction_unknown_fallback() {
+        let result = serde_json::from_str::<QuantityDirection>(r#""SomeNewValue""#).unwrap();
+        assert_eq!(result, QuantityDirection::Unknown);
+    }
+
+    #[test]
+    fn test_price_effect_unknown_fallback() {
+        let result = serde_json::from_str::<PriceEffect>(r#""SomeNewValue""#).unwrap();
+        assert_eq!(result, PriceEffect::Unknown);
     }
 }
