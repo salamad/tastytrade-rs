@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use serde::Serialize;
-
 use crate::client::ClientInner;
 use crate::models::{DetailedQuote, InstrumentType, MarketData};
 use crate::{Error, Result};
@@ -65,27 +63,22 @@ impl MarketDataService {
             )));
         }
 
-        #[derive(Serialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct Query {
-            symbols: String,
-            instrument_type: InstrumentType,
-        }
-
         #[derive(serde::Deserialize)]
         struct Response {
             items: Vec<MarketData>,
         }
 
-        let query = Query {
-            symbols: symbols.join(","),
-            instrument_type,
-        };
+        // Build the query string manually to avoid percent-encoding forward
+        // slashes in symbol names like BRK/B. reqwest's .query() would encode
+        // "/" as "%2F" which the TastyTrade API rejects.
+        let symbols_str = symbols.join(",");
+        let path = format!(
+            "/market-data?symbols={}&instrument-type={}",
+            symbols_str,
+            instrument_type.as_api_str()
+        );
 
-        let response: Response = self
-            .inner
-            .get_with_query("/market-data", &query)
-            .await?;
+        let response: Response = self.inner.get(&path).await?;
         Ok(response.items)
     }
 

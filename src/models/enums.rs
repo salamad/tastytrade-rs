@@ -36,6 +36,20 @@ pub enum InstrumentType {
 }
 
 impl InstrumentType {
+    /// Returns the API query parameter value for this instrument type.
+    pub fn as_api_str(&self) -> &'static str {
+        match self {
+            InstrumentType::Equity => "Equity",
+            InstrumentType::EquityOption => "Equity Option",
+            InstrumentType::Future => "Future",
+            InstrumentType::FutureOption => "Future Option",
+            InstrumentType::Cryptocurrency => "Cryptocurrency",
+            InstrumentType::Warrant => "Warrant",
+            InstrumentType::Index => "Index",
+            InstrumentType::Unknown => "Unknown",
+        }
+    }
+
     /// Returns `true` if this instrument type is a derivative.
     pub fn is_derivative(&self) -> bool {
         matches!(
