@@ -42,7 +42,7 @@ async fn main() -> tastytrade_rs::Result<()> {
     println!();
 
     // 2. Fetch option market data
-    let option_symbol = "AAPL  260223P00255000";
+    let option_symbol = "AAPL  261120P00255000";
     println!("=== AAPL Option Market Data ===");
     println!("Symbol: {}", option_symbol);
     let opt = client.market_data().get(option_symbol, InstrumentType::EquityOption).await?;
