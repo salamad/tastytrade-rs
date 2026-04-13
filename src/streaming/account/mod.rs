@@ -139,9 +139,16 @@ pub enum NotificationAction {
 impl AccountStreamer {
     /// Connect to the account streaming service.
     pub(crate) async fn connect(client: Arc<ClientInner>) -> Result<Self> {
-        // Get the session token (used directly without Bearer prefix for session login)
-        let session_token = client.session.session_token().await;
-        let auth_token = Arc::new(RwLock::new(session_token));
+        // Get the auth token for WebSocket messages.
+        // OAuth2 sessions require "Bearer " prefix, same as REST API.
+        // Legacy session tokens are used directly.
+        let raw_token = client.session.session_token().await;
+        let token = if client.session.is_oauth2().await {
+            format!("Bearer {}", raw_token)
+        } else {
+            raw_token
+        };
+        let auth_token = Arc::new(RwLock::new(token));
 
         // Connect to WebSocket
         let url = client.session.environment().await.account_streamer_url();
@@ -262,11 +269,16 @@ impl AccountStreamer {
         // Ensure session is valid (refresh if expired)
         self.client.session.ensure_valid().await?;
 
-        // Get fresh session token (used directly without Bearer prefix for session login)
-        let session_token = self.client.session.session_token().await;
+        // Get fresh auth token (OAuth2 requires "Bearer " prefix)
+        let raw_token = self.client.session.session_token().await;
+        let fresh_token = if self.client.session.is_oauth2().await {
+            format!("Bearer {}", raw_token)
+        } else {
+            raw_token
+        };
         {
             let mut token = self.auth_token.write().await;
-            *token = session_token;
+            *token = fresh_token;
         }
 
         // Connect to WebSocket
