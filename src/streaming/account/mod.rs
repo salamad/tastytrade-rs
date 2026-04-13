@@ -781,9 +781,15 @@ impl AccountStreamer {
         // Try to parse the JSON
         let json: serde_json::Value = serde_json::from_str(text)?;
 
-        // Get the action type
+        // TastyTrade's account streamer uses two different key schemes:
+        //  - Control messages (heartbeat, connect): keyed by "action"
+        //  - Data notifications (Order, Position, Balance): keyed by "type"
         let action = json.get("action")
             .and_then(|a| a.as_str())
+            .unwrap_or("");
+
+        let notification_type = json.get("type")
+            .and_then(|t| t.as_str())
             .unwrap_or("");
 
         // Check for status field (for connect responses)
@@ -907,13 +913,77 @@ impl AccountStreamer {
                 }
             }
             _ => {
-                // Log unknown notification types for monitoring
-                tracing::warn!(
-                    action = action,
-                    raw_json = %json,
-                    "Received unknown notification type - consider updating the library"
-                );
-                Ok(AccountNotification::Unknown(json))
+                // No recognized "action" — check the "type" field for data notifications.
+                // TastyTrade sends Order/Position/Balance updates with "type" instead of "action".
+                match notification_type {
+                    "Order" => {
+                        let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        match serde_json::from_value::<OrderNotification>(data.clone()) {
+                            Ok(order) => Ok(AccountNotification::Order(order)),
+                            Err(e) => {
+                                tracing::error!(
+                                    notification_type = "Order",
+                                    error = %e,
+                                    raw_data = %data,
+                                    "Failed to deserialize order notification - potential data loss"
+                                );
+                                Ok(AccountNotification::ParseError {
+                                    action: "Order".to_string(),
+                                    error: e.to_string(),
+                                    raw_data: data,
+                                })
+                            }
+                        }
+                    }
+                    "Position" => {
+                        let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        match serde_json::from_value::<PositionNotification>(data.clone()) {
+                            Ok(position) => Ok(AccountNotification::Position(position)),
+                            Err(e) => {
+                                tracing::error!(
+                                    notification_type = "Position",
+                                    error = %e,
+                                    raw_data = %data,
+                                    "Failed to deserialize position notification - potential data loss"
+                                );
+                                Ok(AccountNotification::ParseError {
+                                    action: "Position".to_string(),
+                                    error: e.to_string(),
+                                    raw_data: data,
+                                })
+                            }
+                        }
+                    }
+                    "AccountBalance" => {
+                        let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        match serde_json::from_value::<BalanceNotification>(data.clone()) {
+                            Ok(balance) => Ok(AccountNotification::Balance(Box::new(balance))),
+                            Err(e) => {
+                                tracing::error!(
+                                    notification_type = "AccountBalance",
+                                    error = %e,
+                                    raw_data = %data,
+                                    "Failed to deserialize balance notification - potential data loss"
+                                );
+                                Ok(AccountNotification::ParseError {
+                                    action: "AccountBalance".to_string(),
+                                    error: e.to_string(),
+                                    raw_data: data,
+                                })
+                            }
+                        }
+                    }
+                    _ => {
+                        // Truly unknown notification type
+                        tracing::warn!(
+                            action = action,
+                            notification_type = notification_type,
+                            raw_json = %json,
+                            "Received unknown notification type - consider updating the library"
+                        );
+                        Ok(AccountNotification::Unknown(json))
+                    }
+                }
             }
         }
     }
