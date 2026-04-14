@@ -469,7 +469,7 @@ impl OrderNotification {
 }
 
 /// Order leg notification data.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct OrderLegNotification {
     /// Instrument type
@@ -487,7 +487,7 @@ pub struct OrderLegNotification {
 }
 
 /// Fill notification data.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct FillNotification {
     /// Fill ID
