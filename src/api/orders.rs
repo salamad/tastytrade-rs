@@ -196,17 +196,63 @@ impl OrdersService {
     ///
     /// Use this for order confirmation screens to show the user
     /// the expected fees and buying power impact.
+    ///
+    /// TastyTrade returns HTTP 422 with `preflight_check_failure` when one or
+    /// more validation checks fail. The response body still contains a valid
+    /// `DryRunResponse` with `errors` and `warnings` arrays populated. This
+    /// method parses the 422 body as a `DryRunResponse` so the caller can
+    /// inspect the specific failures rather than getting a generic error.
     pub async fn dry_run(
         &self,
         account_number: &AccountNumber,
         order: NewOrder,
     ) -> Result<DryRunResponse> {
-        self.inner
-            .post(
-                &format!("/accounts/{}/orders/dry-run", account_number),
-                &order,
-            )
-            .await
+        self.inner.ensure_session_valid().await?;
+
+        let url = format!(
+            "{}/accounts/{}/orders/dry-run",
+            self.inner.base_url().await,
+            account_number
+        );
+        let headers = self.inner.build_headers().await?;
+
+        let response = self
+            .inner
+            .http
+            .post(&url)
+            .headers(headers)
+            .json(&order)
+            .send()
+            .await?;
+
+        let status = response.status();
+
+        if status.is_success() || status.as_u16() == 422 {
+            // Both 200 and 422 return a DryRunResponse body.
+            // On 422 (preflight_check_failure), the errors array is populated.
+            let body = response.text().await?;
+            let api_response: crate::client::ApiResponse<DryRunResponse> =
+                serde_json::from_str(&body).map_err(|e| {
+                    tracing::error!(
+                        error = %e,
+                        status = status.as_u16(),
+                        body_preview = &body[..body.len().min(500)],
+                        "Failed to deserialize dry-run response"
+                    );
+                    crate::Error::Json(e)
+                })?;
+            Ok(api_response.data)
+        } else {
+            // Non-422 errors (401, 429, 500, etc.) — use standard error handling
+            let status_code = status.as_u16();
+            let body: serde_json::Value = response.json().await.unwrap_or_default();
+
+            if status_code == 401 {
+                return Err(crate::Error::SessionExpired);
+            }
+
+            Err(crate::Error::from_api_response(status_code, body))
+        }
     }
 
     /// Replace (modify) an existing order.
