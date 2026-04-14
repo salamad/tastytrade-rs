@@ -254,10 +254,62 @@ pub struct OrderNotification {
     pub editable: Option<bool>,
     /// Edited flag
     pub edited: Option<bool>,
-    /// Updated at timestamp
+    /// Updated at timestamp (may arrive as string or integer from TastyTrade)
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     pub updated_at: Option<String>,
-    /// Received at timestamp
+    /// Received at timestamp (may arrive as string or integer from TastyTrade)
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     pub received_at: Option<String>,
+}
+
+/// Deserializer that accepts both string and integer values, converting integers to strings.
+/// TastyTrade's account streamer sends timestamps as integers (Unix millis) in WebSocket
+/// notifications, but as strings in REST API responses.
+fn deserialize_string_or_int<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrInt;
+
+    impl<'de> de::Visitor<'de> for StringOrInt {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a string, integer, or null")
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v.to_string()))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Ok(Some((v as i64).to_string()))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrInt)
 }
 
 /// Custom deserializer for OrderStatus that handles unknown variants gracefully.
@@ -444,7 +496,8 @@ pub struct FillNotification {
     pub quantity: Option<Decimal>,
     /// Fill price
     pub fill_price: Option<Decimal>,
-    /// Filled at timestamp
+    /// Filled at timestamp (may arrive as string or integer)
+    #[serde(default, deserialize_with = "deserialize_string_or_int")]
     pub filled_at: Option<String>,
     /// Destination venue
     pub destination_venue: Option<String>,
