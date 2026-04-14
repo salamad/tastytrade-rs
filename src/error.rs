@@ -25,7 +25,7 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 
     /// API returned an error response
-    #[error("API error: status={status}, code={code:?}, message={message}")]
+    #[error("API error: status={status}, code={code:?}, message={message}, body={body}")]
     Api {
         /// HTTP status code
         status: u16,
