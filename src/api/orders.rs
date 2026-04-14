@@ -227,21 +227,118 @@ impl OrdersService {
 
         let status = response.status();
 
-        if status.is_success() || status.as_u16() == 422 {
-            // Both 200 and 422 return a DryRunResponse body.
-            // On 422 (preflight_check_failure), the errors array is populated.
+        if status.is_success() {
+            // 200: standard ApiResponse wrapper with DryRunResponse in data
             let body = response.text().await?;
             let api_response: crate::client::ApiResponse<DryRunResponse> =
                 serde_json::from_str(&body).map_err(|e| {
                     tracing::error!(
                         error = %e,
-                        status = status.as_u16(),
                         body_preview = &body[..body.len().min(500)],
                         "Failed to deserialize dry-run response"
                     );
                     crate::Error::Json(e)
                 })?;
             Ok(api_response.data)
+        } else if status.as_u16() == 422 {
+            // 422 (preflight_check_failure): TastyTrade returns the error details
+            // in a different structure than success responses. Extract warnings
+            // and errors from the response body.
+            let body = response.text().await?;
+            let json: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+
+            tracing::debug!(
+                body_preview = &body[..body.len().min(1000)],
+                "Dry-run 422 response body"
+            );
+
+            // Try to parse as ApiResponse<DryRunResponse> first (some endpoints
+            // wrap 422 in the standard format)
+            if let Ok(api_response) =
+                serde_json::from_str::<crate::client::ApiResponse<DryRunResponse>>(&body)
+            {
+                return Ok(api_response.data);
+            }
+
+            // Try to parse as bare DryRunResponse (no data wrapper)
+            if let Ok(dry_run) = serde_json::from_str::<DryRunResponse>(&body) {
+                return Ok(dry_run);
+            }
+
+            // Fall back: extract errors from the error object and build a
+            // DryRunResponse with just the error information
+            let mut errors = Vec::new();
+
+            // Check for top-level error.errors array
+            if let Some(error_obj) = json.get("error") {
+                if let Some(error_array) = error_obj.get("errors").and_then(|e| e.as_array()) {
+                    for err in error_array {
+                        let code = err
+                            .get("code")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let message = err
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Unknown preflight error")
+                            .to_string();
+                        errors.push(crate::models::OrderMessage { code, message, preflight_id: None });
+                    }
+                }
+                // If no errors array, use the top-level error message
+                if errors.is_empty() {
+                    let message = error_obj
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Preflight check failed")
+                        .to_string();
+                    let code = error_obj
+                        .get("code")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("preflight_check_failure")
+                        .to_string();
+                    errors.push(crate::models::OrderMessage { code, message, preflight_id: None });
+                }
+            }
+
+            // Extract warnings similarly
+            let mut warnings = Vec::new();
+            if let Some(warning_array) = json
+                .get("error")
+                .and_then(|e| e.get("warnings"))
+                .and_then(|w| w.as_array())
+            {
+                for warn in warning_array {
+                    let code = warn
+                        .get("code")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let message = warn
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Unknown warning")
+                        .to_string();
+                    warnings.push(crate::models::OrderMessage { code, message, preflight_id: None });
+                }
+            }
+
+            Ok(DryRunResponse {
+                order: None,
+                buying_power_effect: None,
+                fee_calculation: None,
+                warnings: if warnings.is_empty() {
+                    None
+                } else {
+                    Some(warnings)
+                },
+                errors: if errors.is_empty() {
+                    None
+                } else {
+                    Some(errors)
+                },
+            })
         } else {
             // Non-422 errors (401, 429, 500, etc.) — use standard error handling
             let status_code = status.as_u16();

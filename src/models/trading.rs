@@ -201,11 +201,12 @@ impl PlacedOrderResponse {
 }
 
 /// Response from dry-run order validation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct DryRunResponse {
-    /// The order as it would be placed
-    pub order: super::Order,
+    /// The order as it would be placed (absent in 422 error responses)
+    #[serde(default)]
+    pub order: Option<super::Order>,
     /// Effect on buying power
     #[serde(default)]
     pub buying_power_effect: Option<BuyingPowerEffect>,
