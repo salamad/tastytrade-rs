@@ -130,8 +130,20 @@ async fn main() -> tastytrade_rs::Result<()> {
         .add_leg(InstrumentType::Equity, "AAPL", OrderAction::BuyToOpen, 10)
         .build()?;
 
-    // Validate with dry run first
+    // Validate with dry run first. Note: a 422 preflight_check_failure is
+    // returned as a populated DryRunResponse (not an Error) so callers can
+    // inspect `warnings` and `errors` to see why validation failed. The
+    // `order` field is `Option<Order>` and is `None` when preflight fails.
     let dry_run = client.orders().dry_run(&account, &order).await?;
+    if let Some(errors) = &dry_run.errors {
+        if !errors.is_empty() {
+            eprintln!("Preflight failed: {:?}", errors);
+            return Ok(());
+        }
+    }
+    for warning in dry_run.warnings.as_deref().unwrap_or(&[]) {
+        eprintln!("Warning: {:?}", warning);
+    }
     println!("Buying power effect: {:?}", dry_run.buying_power_effect);
 
     // Place the order
@@ -603,6 +615,35 @@ if let AccountNotification::Order(order) = notification? {
     // State categories
     order.is_terminal();    // Filled, Rejected, Cancelled, or Expired
     order.is_working();     // Received, Routed, InFlight, or Live
+}
+```
+
+#### Additional Recognized Notifications
+
+Beyond the core `Order`, `Position`, and `Balance` variants, the streamer also
+recognizes these notification types that TastyTrade pushes routinely. Each
+holds the raw `serde_json::Value` payload — the library is intentionally
+schema-agnostic here since TastyTrade adds fields over time. Consumers that
+need typed access can deserialize the value themselves.
+
+| Variant | Description |
+|---------|-------------|
+| `CurrentPosition` | Position snapshot pushed on state changes — includes daily/yearly close prices, realized day-gain values, and other position metadata. Larger payload than `Position`. |
+| `OrderChain` | Status update for a related sequence of orders (e.g., entry → exit → roll). |
+| `UnderlyingYearGainSummary` | Per-underlying YTD realized-gain summary, recomputed after fills. |
+| `QuoteAlert` | Quote alert triggered. |
+
+```rust
+match notification? {
+    AccountNotification::CurrentPosition(json) => {
+        // Inspect raw payload or deserialize into your own struct
+        if let Some(symbol) = json.get("symbol").and_then(|v| v.as_str()) {
+            println!("Position update for {}", symbol);
+        }
+    }
+    AccountNotification::OrderChain(_) => { /* opt-in handling */ }
+    AccountNotification::UnderlyingYearGainSummary(_) => { /* opt-in handling */ }
+    _ => {}
 }
 ```
 
