@@ -26,6 +26,29 @@ pub enum AccountNotification {
     /// Quote alert triggered
     QuoteAlert(QuoteAlertNotification),
 
+    /// Current position snapshot.
+    ///
+    /// Pushed when a position's state is updated (e.g., quantity, realized P&L).
+    /// Larger payload than `Position` — includes daily/yearly close prices,
+    /// realized day-gain values, and other position metadata.
+    ///
+    /// The full schema is intentionally exposed as `serde_json::Value` because
+    /// TastyTrade adds fields over time and a strict struct would be brittle.
+    /// Consumers that need typed access can deserialize the value themselves.
+    CurrentPosition(serde_json::Value),
+
+    /// Order chain status update.
+    ///
+    /// An order chain is a related sequence of orders (e.g., entry → exit →
+    /// roll). TastyTrade pushes summary updates as the chain progresses.
+    OrderChain(serde_json::Value),
+
+    /// Per-underlying year-to-date gain summary.
+    ///
+    /// Pushed when the YTD realized gain figure for an underlying is
+    /// recomputed (typically after fills).
+    UnderlyingYearGainSummary(serde_json::Value),
+
     // ===== Connection Lifecycle Events (Gap 3) =====
 
     /// WebSocket connection was lost.

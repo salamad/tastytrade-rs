@@ -973,6 +973,23 @@ impl AccountStreamer {
                             }
                         }
                     }
+                    // Recognized-but-not-typed notifications: TastyTrade emits these
+                    // routinely. We surface them as discrete enum variants holding the
+                    // raw JSON so consumers can opt in to handling them, but the
+                    // library itself does not enforce a schema (TastyTrade adds fields
+                    // over time and a strict struct would be brittle).
+                    "CurrentPosition" => {
+                        let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        Ok(AccountNotification::CurrentPosition(data))
+                    }
+                    "OrderChain" => {
+                        let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        Ok(AccountNotification::OrderChain(data))
+                    }
+                    "UnderlyingYearGainSummary" => {
+                        let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+                        Ok(AccountNotification::UnderlyingYearGainSummary(data))
+                    }
                     _ => {
                         // Truly unknown notification type
                         tracing::warn!(
