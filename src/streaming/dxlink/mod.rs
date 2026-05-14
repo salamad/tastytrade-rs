@@ -1284,14 +1284,25 @@ impl DxLinkStreamer {
             "acceptKeepaliveTimeout": 60,
             "version": Self::DXLINK_VERSION
         });
+        // Connect-handshake messages bypass `send_message` (the write
+        // half hasn't been split into self.write yet). Log them here
+        // so the wire trace is complete.
+        tracing::debug!(msg_type = "SETUP", payload = %setup, "DXLink outbound (connect)");
         ws_stream.send(Message::Text(setup.to_string())).await?;
 
-        // Step 2: Send AUTH message
+        // Step 2: Send AUTH message — log type only; the token is a
+        // bearer credential and must NOT appear in logs.
         let auth = serde_json::json!({
             "type": "AUTH",
             "channel": 0,
             "token": token
         });
+        tracing::debug!(
+            msg_type = "AUTH",
+            channel = 0,
+            token = "<redacted>",
+            "DXLink outbound (connect)"
+        );
         ws_stream.send(Message::Text(auth.to_string())).await?;
 
         // Step 3: Wait for AUTH_STATE: AUTHORIZED
@@ -1358,6 +1369,19 @@ impl DxLinkStreamer {
     }
 
     async fn send_message(&self, msg: &serde_json::Value) -> Result<()> {
+        // Wire-level logging for DXLink support / debugging:
+        //   - KEEPALIVE fires every keepalive_interval seconds, so it
+        //     is logged at TRACE to avoid flooding INFO/DEBUG.
+        //   - Everything else (FEED_SETUP, CHANNEL_REQUEST,
+        //     FEED_SUBSCRIPTION, etc.) is logged at DEBUG so it can be
+        //     surfaced selectively with `RUST_LOG=tastytrade_rs=debug`
+        //     without enabling per-message trace noise.
+        let msg_type = msg.get("type").and_then(|v| v.as_str()).unwrap_or("?");
+        if msg_type == "KEEPALIVE" {
+            tracing::trace!(msg_type, payload = %msg, "DXLink outbound");
+        } else {
+            tracing::debug!(msg_type, payload = %msg, "DXLink outbound");
+        }
         let mut write = self.write.write().await;
         write.send(Message::Text(msg.to_string())).await?;
         Ok(())
@@ -1464,6 +1488,24 @@ impl DxLinkStreamer {
             match msg {
                 Ok(Message::Text(text)) => {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // Wire-level inbound logging for DXLink
+                        // support / debugging:
+                        //   - FEED_DATA fires per market event (high
+                        //     volume) so it is logged at TRACE.
+                        //   - Control-plane messages (AUTH_STATE,
+                        //     CHANNEL_OPENED, KEEPALIVE, ERROR, …) are
+                        //     logged at DEBUG so they can be surfaced
+                        //     selectively with `RUST_LOG=tastytrade_rs=debug`.
+                        let inbound_type = json
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("?");
+                        if inbound_type == "FEED_DATA" || inbound_type == "KEEPALIVE" {
+                            tracing::trace!(msg_type = inbound_type, payload = %json, "DXLink inbound");
+                        } else {
+                            tracing::debug!(msg_type = inbound_type, payload = %json, "DXLink inbound");
+                        }
+
                         // Handle different message types
                         if let Some(msg_type) = json.get("type").and_then(|t| t.as_str()) {
                             match msg_type {
