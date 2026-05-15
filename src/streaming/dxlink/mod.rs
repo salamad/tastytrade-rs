@@ -923,9 +923,40 @@ impl DxLinkStreamer {
     ///
     /// Each symbol is sent as a separate entry in the unsubscribe message,
     /// per DXLink protocol requirements.
+    ///
+    /// **No-op when the channel was never opened.** Sending a
+    /// FEED_SUBSCRIPTION `remove` on a channel that hasn't been
+    /// opened (i.e. no prior `subscribe<E>` for this event type)
+    /// produces a server-side `BAD_ACTION: "Channel with id N not
+    /// exists"` error. The fix is symmetric with `subscribe<E>`,
+    /// which always calls `ensure_channel_open(event_type)` before
+    /// the wire write. If the channel state isn't `Opened`, we
+    /// return success without touching the wire — the local
+    /// tracking map is also unchanged because there can be no
+    /// subscriptions to remove for a never-opened event type.
     pub async fn unsubscribe<E: DxEventTrait>(&mut self, symbols: &[&str]) -> Result<()> {
         let event_type = E::event_type();
         let channel_id = event_type.channel_id();
+
+        // Guard: skip the wire write when the channel was never
+        // opened. Without this, callers that defensively unsubscribe
+        // multiple event types ("we don't care if it wasn't
+        // subscribed") emit BAD_ACTION errors that pollute the
+        // server-side logs and our own audit trail.
+        {
+            let states = self.channel_states.read().await;
+            match states.get(&channel_id) {
+                Some(ChannelState::Opened) => {} // proceed with wire write
+                _ => {
+                    tracing::debug!(
+                        channel = channel_id,
+                        event_type = event_type.as_str(),
+                        "Skipping unsubscribe — channel not open"
+                    );
+                    return Ok(());
+                }
+            }
+        }
 
         // Build remove array with one entry per symbol (per DXLink protocol)
         let remove: Vec<_> = symbols
